@@ -62,7 +62,13 @@ async function syncBodyTypeChoices(legistarBodies) {
 // ---------------------------------------------------------------------------
 const table = base.getTable('Bodies');
 
+const startDate = await input.textAsync('Start date for sync (YYYY-MM-DD):');
+if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+  throw new Error(`Invalid date format: "${startDate}". Expected YYYY-MM-DD (e.g. 2020-01-01).`);
+}
+
 output.text('Step 1/5 — Fetching bodies from Legistar...');
+output.text(`  Note: Bodies is a full sync — start date (${startDate}) is not applied.`);
 const legistarBodies = await fetchLegistarBodies();
 output.text(`  Found ${legistarBodies.length} bodies.`);
 

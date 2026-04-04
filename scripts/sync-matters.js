@@ -3,13 +3,12 @@
 // =============================================================================
 // Run as a Scripting Extension (manual).
 // Safe to run repeatedly — uses upsert logic (create or update by MatterId).
-// Filters to matters introduced on or after 2015-01-01.
+// Prompts for a start date and filters to matters introduced on or after that date.
 // Paginates Legistar in pages of 1000 until all records are fetched.
 // =============================================================================
 
 const LEGISTAR_BASE = 'https://webapi.legistar.com/v1/corpuschristi';
 const BATCH_SIZE = 50;
-const START_DATE = '2015-01-01';
 
 // Legistar UTC timestamps — append 'Z' for Airtable dateTime fields.
 function toUtcString(ts) {
@@ -25,13 +24,13 @@ function toDateString(ts) {
 }
 
 // ---------------------------------------------------------------------------
-// Fetch all Matters from Legistar introduced on or after START_DATE.
+// Fetch all Matters from Legistar introduced on or after startDate (YYYY-MM-DD).
 // ---------------------------------------------------------------------------
-async function fetchLegistarMatters() {
+async function fetchLegistarMatters(startDate) {
   const all = [];
   let skip = 0;
   const top = 1000;
-  const filter = `MatterIntroDate ge datetime'${START_DATE}T00:00:00'`;
+  const filter = `MatterIntroDate ge datetime'${startDate}T00:00:00'`;
 
   while (true) {
     const url = `${LEGISTAR_BASE}/Matters?$top=${top}&$skip=${skip}&$filter=${encodeURIComponent(filter)}`;
@@ -73,9 +72,14 @@ async function syncSelectChoices(fieldName, values) {
 // ---------------------------------------------------------------------------
 const table = base.getTable('Matters');
 
+const startDate = await input.textAsync('Start date for sync (YYYY-MM-DD):');
+if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+  throw new Error(`Invalid date format: "${startDate}". Expected YYYY-MM-DD (e.g. 2020-01-01).`);
+}
+
 output.text('Step 1/5 — Fetching matters from Legistar...');
-const legistarMatters = await fetchLegistarMatters();
-output.text(`  Found ${legistarMatters.length} matters (${START_DATE} onward).`);
+const legistarMatters = await fetchLegistarMatters(startDate);
+output.text(`  Found ${legistarMatters.length} matters (${startDate} onward).`);
 
 output.text('Step 2/5 — Syncing select field choices...');
 await syncSelectChoices('MatterType',   legistarMatters.map(m => m.MatterTypeName));

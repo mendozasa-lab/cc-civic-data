@@ -10,7 +10,7 @@ Pulls all public meeting data from the City of Corpus Christi's Legistar system 
 
 **All scripts run inside Airtable** — either as scripting extensions (manual) or automations (triggered). The Node.js scaffolding in `scripts/` and `package.json` is not used for Airtable work.
 
-**Multi-base strategy (decided 2026-04-03):** The primary working base will contain only actively-used data. Separate duplicate bases are used to explore full datasets and determine what's actually needed before committing to a schema. Events, Matter Attachments, Event Items, and Votes have not yet been synced to the primary base.
+**Historical depth (decided 2026-04-04):** All sync scripts prompt for a start date at runtime. Bodies and Persons are full syncs (no date filter). Matters, Events, and downstream tables filter by their primary date field from the user-supplied start date onward. The duplicate-base exploration strategy was set aside in favor of this approach.
 
 **Corpus Christi specifics:**
 - Legistar client slug: `corpuschristi`
@@ -22,7 +22,7 @@ Work also involves Airtable extension scripts (run manually in the scripting ext
 
 ## Airtable Base Structure
 
-8 tables. See `legistar setup/` for full field specs. Setup script: `scripts/airtable-setup.js`.
+9 tables. See `legistar setup/` for full field specs. Setup script: `scripts/airtable-setup.js`. Office Records table created via `scripts/create-office-records-table.js`.
 
 | Table | Primary Field | Links To |
 |-------|--------------|----------|
@@ -34,6 +34,7 @@ Work also involves Airtable extension scripts (run manually in the scripting ext
 | Event Items | EventItemId (number) | Events, Matters |
 | Transcripts | YouTubeVideoId (text)* | Events |
 | Votes | VoteId (number) | Event Items, Persons |
+| Office Records | OfficeRecordId (number) | Persons, Bodies |
 
 *TranscriptId (autoNumber), YouTubeURL (formula), and TranscriptWordCount (formula) must be added manually — autoNumber and formula fields cannot be created via script.
 
@@ -81,13 +82,14 @@ All sync scripts follow this pattern. See completed scripts for reference implem
 |--------|--------|---------|
 | `scripts/sync-bodies.js` | ✅ Complete | 51 |
 | `scripts/sync-persons.js` | ✅ Complete | 5,008 |
-| `scripts/sync-matters.js` | ✅ Complete | 16,204 |
-| `scripts/sync-events.js` | ⬜ Not started | — |
-| `scripts/sync-matter-attachments.js` | ⬜ Not started | — |
-| `scripts/sync-event-items.js` | ⬜ Not started | — |
+| `scripts/sync-matters.js` | ✅ Complete | 9,795 (2020-01-01 onward) |
+| `scripts/sync-events.js` | ✅ Complete | 1,398 (2020-01-01 onward) |
+| `scripts/sync-matter-attachments.js` | ✅ Complete | 21,305 (~50 fetch errors, skipped) |
+| `scripts/sync-event-items.js` | ✅ Complete | 29,749 (136 matter links unresolved — pre-2020) |
 | `scripts/sync-votes.js` | ⬜ Not started | — |
+| `scripts/sync-office-records.js` | ⬜ Not started | — |
 
-**Running Airtable record count: ~21,263 / 50,000**
+**Running Airtable record count: ~67,306 / 125,000**
 | Create/modify tables & fields | ✅ | ❌ |
 
 ## Field Types That Cannot Be Created via Script

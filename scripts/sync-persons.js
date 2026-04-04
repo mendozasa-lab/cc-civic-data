@@ -43,7 +43,13 @@ async function fetchLegistarPersons() {
 // ---------------------------------------------------------------------------
 const table = base.getTable('Persons');
 
+const startDate = await input.textAsync('Start date for sync (YYYY-MM-DD):');
+if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+  throw new Error(`Invalid date format: "${startDate}". Expected YYYY-MM-DD (e.g. 2020-01-01).`);
+}
+
 output.text('Step 1/4 — Fetching persons from Legistar...');
+output.text(`  Note: Persons is a full sync — start date (${startDate}) is not applied.`);
 const legistarPersons = await fetchLegistarPersons();
 output.text(`  Found ${legistarPersons.length} persons.`);
 
