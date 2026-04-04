@@ -1,0 +1,14 @@
+{
+  "name": "cc-civic-data",
+  "version": "1.0.0",
+  "description": "Scripts for pulling Legistar API data into Airtable and generating meeting transcripts.",
+  "main": "index.js",
+  "scripts": {
+    "sync": "node scripts/sync.js"
+  },
+  "dependencies": {
+    "airtable": "^0.12.2",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1"
+  }
+}
