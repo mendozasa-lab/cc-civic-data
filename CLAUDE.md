@@ -6,7 +6,7 @@ Pulls all public meeting data from the City of Corpus Christi's Legistar system 
 
 **Two workstreams:**
 1. **Legistar → Airtable sync** — Airtable extension and automation scripts call the Legistar API via `fetch`/`remoteFetchAsync` and write to Airtable using scripting globals (`base`, `table`, etc.). No external runtime, no credentials needed.
-2. **Meeting transcription** — Pull YouTube auto-captions and store in Transcripts table; future upgrade to Whisper/AssemblyAI
+2. **Meeting transcription** — Fetch Granicus video URLs, submit to AssemblyAI for diarized/timestamped transcription, store in Transcripts + Transcript Segments tables, link segments to Persons.
 
 **All scripts run inside Airtable** — either as scripting extensions (manual) or automations (triggered). The Node.js scaffolding in `scripts/` and `package.json` is not used for Airtable work.
 
@@ -37,6 +37,8 @@ Work also involves Airtable extension scripts (run manually in the scripting ext
 | Office Records | OfficeRecordId (number) | Persons, Bodies |
 
 *TranscriptId (autoNumber), YouTubeURL (formula), and TranscriptWordCount (formula) must be added manually — autoNumber and formula fields cannot be created via script.
+
+**Events.EventMedia** = Granicus clip ID (text). 637 of 1,398 events have a value. Used to look up the Granicus player page and extract the M3U8 media URL for transcription.
 
 ## Airtable Scripting Conventions
 
@@ -89,8 +91,7 @@ All sync scripts follow this pattern. See completed scripts for reference implem
 | `scripts/sync-votes.js` | ⬜ Not started | — |
 | `scripts/sync-office-records.js` | ⬜ Not started | — |
 
-**Running Airtable record count: ~67,306 / 125,000**
-| Create/modify tables & fields | ✅ | ❌ |
+**Running Airtable record count: ~67,306 / 125,000** (pending: Votes, Office Records)
 
 ## Field Types That Cannot Be Created via Script
 
@@ -113,9 +114,38 @@ All sync scripts follow this pattern. See completed scripts for reference implem
 
 **Linked record resolution:** To link e.g. an Event to its Body, find the Airtable record ID in Bodies where `BodyId` = `EventBodyId`, then use that Airtable record ID in the link field.
 
-**Sync order** (respects foreign key dependencies): Bodies → Persons → Matters → Events → Matter Attachments → Event Items → Votes → Transcripts (separate workflow)
+**Sync order** (respects foreign key dependencies): Bodies → Persons → Matters → Events → Matter Attachments → Event Items → Votes → Office Records → Transcripts (separate workflow)
 
 **Incremental sync filter syntax:** `$filter=EventLastModifiedUtc gt datetime'2025-06-01T00:00:00'`
+
+## Transcription Pipeline (planned, not yet built)
+
+**Goal:** "Who said what and when" — diarized, timestamped transcripts linked to Person records.
+
+**Video source:** Granicus (not YouTube). Videos are at `corpuschristi.granicus.com`.
+- `EventMedia` field on Events holds the Granicus clip ID (e.g. `"2171"`)
+- Player page: `https://corpuschristi.granicus.com/player/clip/{clipId}?view_id=2&redirect=true`
+- Media URL extracted via regex on page source: `video_url="(https://archive-stream\.granicus\.com/[^"]+\.m3u8)"`
+- M3U8 HLS streams are supported by AssemblyAI directly — no download step needed
+
+**Transcription service:** AssemblyAI (`speaker_labels: true` for diarization)
+- Workflow: submit job → get job ID → poll for completion → parse segments
+- Requires AssemblyAI API key stored via `input.secret('AssemblyAI Key')` in an automation
+
+**Data model — Transcript Segments table (not yet created):**
+One record per speaker turn, linked to Transcript, Event, and Person.
+| Field | Type |
+|-------|------|
+| Transcript | linked → Transcripts |
+| Person | linked → Persons (after speaker mapping) |
+| SpeakerLabel | text (e.g. "Speaker A") |
+| StartTime | number (ms) |
+| EndTime | number (ms) |
+| SegmentText | longText |
+
+**Speaker mapping:** AssemblyAI returns "Speaker A", "Speaker B", etc. User maps labels to Person records after reviewing the transcript. This step is manual per meeting.
+
+**Scope:** City Council meetings only, manually triggered per event. ~637 events have a Granicus clip ID.
 
 ## Full API References
 
