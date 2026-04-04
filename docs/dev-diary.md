@@ -76,6 +76,65 @@ Entry template:
 
 ---
 
+## 2026-04-03 — All scripts run inside Airtable (correction to initial assumption)
+
+**Context:** Initial project scaffolding included Node.js, axios, and the Airtable SDK, implying sync scripts would run externally. Clarified that all scripts — including Legistar sync — will run inside Airtable as extensions or automations.
+
+**Decision:** Use Airtable's scripting environment for everything. Legistar API calls use `fetch`/`remoteFetchAsync`. Airtable reads/writes use scripting globals (`base`, `table`, etc.). No external runtime, no credentials, no `.env`.
+
+**Implications:**
+- Initial bulk syncs must run as **extensions** (manual) due to the 30-second automation timeout
+- Incremental/triggered syncs can run as automations once the backfill is done
+- The Node.js scaffolding in `scripts/` and `package.json` is vestigial — not used for Airtable work
+
+**Open questions / follow-up:** Decide whether to keep or remove the Node.js scaffolding. It's not harmful but could be confusing.
+
+---
+
+## 2026-04-03 — Actual record counts from initial sync (Bodies + Persons)
+
+**Context:** Running the first two sync scripts revealed actual record counts, which differed significantly from estimates.
+
+**Findings:**
+- Bodies: 51 records (matched estimate)
+- Persons: 5,008 records (estimated 330 — off by 15x)
+- Persons hit the 1,000-record Legistar page cap on the first run, silently truncating results. Pagination was added and the full dataset was retrieved on the second run.
+- Persons likely includes all staff, contractors, and historical figures — not just elected officials.
+
+**Running record count:** ~5,059 / 50,000 Airtable limit used after two tables.
+
+**Implications:** Earlier estimates for total records are unreliable. Monitor the running total as each table is synced. If the limit becomes a concern, Persons could be filtered to active records or those with vote history.
+
+**Open questions / follow-up:** Revisit record limit headroom after Matters and Events are synced — those are the next largest tables.
+
+---
+
+## 2026-04-03 — Multi-base strategy for managing record limits
+
+**Context:** After syncing Bodies (51), Persons (5,008), and Matters (16,204), the running total hit 21,263 / 50,000 records. Remaining tables — especially Matter Attachments and Votes — threatened to exceed the limit.
+
+**Decision:** Duplicate the base and use copies to sync remaining tables in full, explore what data is actually needed, and determine sensible date cutoffs. The primary base will only receive data that's actively useful. A future "slim" base may hold only what's needed for short-term work.
+
+**Alternatives considered:** Filtering Persons to active-only, skipping Matter Attachments, upgrading plan. All deferred — explore first, decide later.
+
+**Open questions / follow-up:** After exploring the duplicate bases, decide which tables and date ranges belong in the primary base.
+
+---
+
+## 2026-04-03 — Session 1 sync progress summary
+
+Completed: Bodies, Persons, Matters sync scripts. All working and verified with re-runs.
+
+Key patterns established (now documented in CLAUDE.md):
+- `remoteFetchAsync` required for Legistar (CORS)
+- Pagination required on all endpoints (hit the 1000-record wall on Persons)
+- `syncSelectChoices` helper for singleSelect fields
+- `toDateString` / `toUtcString` / `emptyToNull` utility functions
+
+Remaining scripts to write: Events, Matter Attachments, Event Items, Votes.
+
+---
+
 ## 2026-04-03 — Sync script technology choices
 
 **Context:** Needed to choose a runtime and HTTP/Airtable libraries for the Node.js sync scripts.
