@@ -147,3 +147,92 @@ Remaining scripts to write: Events, Matter Attachments, Event Items, Votes.
 - Sync scheduling tool not yet decided. Options: Airtable Automations (limited by 30s timeout), n8n/Pipedream, or local cron/Task Scheduler. Decision needed before writing the incremental sync.
 - Historical backfill depth not decided — sync everything, or start from a specific year?
 - Error handling and logging strategy not yet designed.
+
+---
+
+## 2026-04-04 — All Legistar tables synced to Airtable
+
+All 9 tables fully synced. Final record counts:
+- Bodies: 51 | Persons: 5,008 | Matters: 9,795 | Events: 1,398
+- Matter Attachments: 21,305 (~50 fetch errors skipped)
+- Event Items: 29,749 (136 matter links unresolved — pre-2020)
+- Votes: 42,579 (~105 fetch errors skipped)
+- Office Records: 1,004
+- **Total: ~111,069 / 125,000 Airtable record limit**
+
+**Key discovery — VoteId is not globally unique.** Legistar assigns one VoteId per person per meeting; the same VoteId appears on every agenda item that person voted on that day. The true unique key is `(VoteId, EventItemId)`. This was discovered when the initial migration to Supabase failed with a duplicate key conflict.
+
+---
+
+## 2026-04-04 — Architecture pivot: Airtable → Supabase + Streamlit
+
+**Context:** Planning the transcription pipeline revealed that Transcript Segments (one record per speaker turn, ~300-600 per meeting × 637 meetings ≈ 255k records) would far exceed the Airtable Business plan limit of 125k. Upgrading Airtable wasn't acceptable. The project goal is a **public-facing civic data app**, which Airtable's sharing model doesn't support well.
+
+**Decision:** Migrate all data to Supabase (PostgreSQL, free tier, unlimited rows) and build a public Streamlit app. Airtable is retired as the primary data store.
+
+**Implications:**
+- Legistar sync scripts will be rewritten in Python (structurally identical logic, different syntax)
+- Scheduled syncs will use GitHub Actions (free on public repos) instead of Airtable automations
+- Manual data edits use Supabase's Table Editor (equivalent to Airtable grid view)
+- The existing JavaScript sync scripts in `scripts/` remain as reference implementations
+
+**Alternatives considered:**
+- Multiple Airtable bases with cross-base sync: messy linked records, still Airtable-constrained
+- Upgrading to Airtable Enterprise: cost-prohibitive
+- Keeping Airtable for Legistar + Supabase only for transcripts: two systems to maintain
+
+**Open questions / follow-up:** Python sync scripts not yet written. GitHub Actions workflow not yet configured. Transcription pipeline planning deferred until app foundation is stable.
+
+---
+
+## 2026-04-04 — Supabase schema design: composite PK on votes
+
+**Context:** Discovered during migration that VoteId is not a unique identifier (see above). Initial schema used `vote_id INTEGER PRIMARY KEY`, which caused a constraint violation during upsert.
+
+**Decision:** Changed votes primary key to `PRIMARY KEY (vote_id, event_item_id)`. This matches Legistar's actual data model where a vote record is uniquely identified by the combination of the person's meeting-level vote ID and the specific agenda item.
+
+---
+
+## 2026-04-04 — Airtable → Supabase migration: field name bug in matter_attachments
+
+**Context:** After migration, `attachment_name` and `attachment_hyperlink` columns in Supabase were null for all records.
+
+**Cause:** The migration script used Legistar source field names (`MatterAttachmentName`, `MatterAttachmentHyperlink`) instead of the Airtable field names (`AttachmentName`, `AttachmentHyperlink`). The Airtable scripting API strips the `Matter` prefix when storing these fields.
+
+**Fix:** Updated field references in `scripts/migrate_to_supabase.py` to use Airtable field names.
+
+---
+
+## 2026-04-05 — Streamlit prototype: council member profiles live
+
+**Context:** First working version of the public Streamlit app built against Supabase.
+
+**What's working:**
+- Council member list in sidebar (sourced from office_records + bodies join, filtered to City Council body)
+- Profile header: name, current title, term dates, email
+- Vote metrics: total votes, Aye %, Nay count, Absent count
+- Voting breakdown pie chart (Plotly)
+- Vote history table with keyword search
+- Term history expander
+
+**Key bugs fixed during this session:**
+1. Supabase default row limit of 1000 silently truncating vote counts — fixed with `fetch_all()` pagination helper that pages through results in chunks of 1000 until exhausted
+2. `load_council_members` also needed pagination (1004 office records > 1000 default)
+
+**Stack:** Streamlit (UI) + supabase-py (data) + Plotly (charts) + Pandas (data manipulation). Files in `streamlit_app/`.
+
+**Open questions / follow-up:**
+- Transcription pipeline not yet started (service choice: ElevenLabs Scribe v2 selected for best accuracy)
+- Python Legistar sync scripts not yet written (will replace Airtable JS scripts)
+- GitHub Actions scheduling not yet configured
+- Additional app pages (meetings, vote explorer, matters browser) not yet built
+- Streamlit Community Cloud deployment not yet done
+
+---
+
+## 2026-04-05 — Next session priorities
+
+1. **Verify Supabase migration and delete Airtable** — spot-check record counts and a sample of FK-linked records across all 8 tables. Once confident, delete the Airtable base to free up the plan.
+2. **Transcription pipeline** — add `transcript_segments` table to Supabase schema, write Python script to fetch Granicus M3U8 → submit to ElevenLabs Scribe v2 → store segments, write speaker mapping script.
+3. **Deploy Streamlit app publicly** — push to GitHub, connect to Streamlit Community Cloud.
+4. **Extend historical depth to 2015** — current sync covers 2020-present. Re-run Matters, Events, Event Items, and Votes syncs from 2015-01-01. Expect significant record count growth; verify Supabase free tier (500MB) still has headroom afterward.

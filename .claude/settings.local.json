@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:webapi.legistar.com)"
+      "WebFetch(domain:webapi.legistar.com)",
+      "WebSearch",
+      "WebFetch(domain:elevenlabs.io)",
+      "WebFetch(domain:www.assemblyai.com)",
+      "WebFetch(domain:www.speechmatics.com)",
+      "WebFetch(domain:www.pyannote.ai)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:help.elevenlabs.io)"
     ]
   }
 }
