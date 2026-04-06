@@ -6,10 +6,6 @@ import streamlit as st
 
 from utils.db import load_events_with_transcripts, load_segments_for_event, load_meeting_summary
 
-st.sidebar.title("🏛️ CC Civic Data")
-st.sidebar.markdown("Corpus Christi city council meeting records.")
-st.sidebar.divider()
-
 st.title("Meetings & Transcripts")
 st.markdown("Browse council meeting transcripts. Select a meeting to see who said what.")
 

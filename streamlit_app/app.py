@@ -10,8 +10,12 @@ st.set_page_config(
     layout="wide",
 )
 
+st.sidebar.title("🏛️ CC Civic Data")
+st.sidebar.markdown("Corpus Christi city council meeting records.")
+st.sidebar.divider()
+
 pg = st.navigation([
-    st.Page("pages/meetings.py", title="Meetings", icon="🏛️"),
-    st.Page("pages/persons.py", title="Persons", icon="🏛️"),
+    st.Page("pages/meetings.py", title="Meetings", icon="📅"),
+    st.Page("pages/persons.py", title="Persons", icon="👤"),
 ])
 pg.run()

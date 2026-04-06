@@ -12,10 +12,6 @@ from utils.db import load_council_members, load_votes_for_person, load_segments_
 # Sidebar — council member picker
 # ---------------------------------------------------------------------------
 
-st.sidebar.title("🏛️ CC Civic Data")
-st.sidebar.markdown("Corpus Christi city council meeting records.")
-st.sidebar.divider()
-
 with st.sidebar:
     with st.spinner("Loading council members..."):
         council_members = load_council_members()
