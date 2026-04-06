@@ -6,6 +6,10 @@ import streamlit as st
 
 from utils.db import load_events_with_transcripts, load_segments_for_event, load_meeting_summary
 
+st.sidebar.title("🏛️ CC Civic Data")
+st.sidebar.markdown("Corpus Christi city council meeting records.")
+st.sidebar.divider()
+
 st.title("Meetings & Transcripts")
 st.markdown("Browse council meeting transcripts. Select a meeting to see who said what.")
 
@@ -21,7 +25,7 @@ if not meetings:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Meeting selector
+# Meeting selector (sidebar)
 # ---------------------------------------------------------------------------
 
 def meeting_label(m: dict) -> str:
@@ -30,7 +34,7 @@ def meeting_label(m: dict) -> str:
     return f"{date} — {body}"
 
 labels = [meeting_label(m) for m in meetings]
-selected_label = st.selectbox("Select a meeting", labels)
+selected_label = st.sidebar.selectbox("Select a meeting", labels)
 selected_meeting = meetings[labels.index(selected_label)]
 
 st.divider()

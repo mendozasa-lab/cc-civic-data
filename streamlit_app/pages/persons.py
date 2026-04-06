@@ -13,7 +13,7 @@ from utils.db import load_council_members, load_votes_for_person, load_segments_
 # ---------------------------------------------------------------------------
 
 st.sidebar.title("🏛️ CC Civic Data")
-st.sidebar.markdown("Corpus Christi city council voting records.")
+st.sidebar.markdown("Corpus Christi city council meeting records.")
 st.sidebar.divider()
 
 with st.sidebar:
