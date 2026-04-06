@@ -191,6 +191,40 @@ CREATE POLICY "public read" ON transcript_segments FOR SELECT USING (true);
 CREATE POLICY "public read" ON speaker_mappings    FOR SELECT USING (true);
 
 -- ---------------------------------------------------------------------------
+-- Summary tables
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS meeting_summaries (
+  summary_id      SERIAL PRIMARY KEY,
+  transcript_id   INTEGER NOT NULL REFERENCES transcripts(transcript_id),
+  event_id        INTEGER NOT NULL REFERENCES events(event_id),
+  summary_text    TEXT NOT NULL,   -- overall meeting narrative
+  member_briefs   JSONB,           -- {person_id: {name, summary, quotes: [...]}}
+  model           TEXT,
+  generated_at    TIMESTAMPTZ DEFAULT now(),
+  UNIQUE (transcript_id)
+);
+
+CREATE TABLE IF NOT EXISTS member_summaries (
+  member_summary_id  SERIAL PRIMARY KEY,
+  person_id          INTEGER NOT NULL REFERENCES persons(person_id),
+  summary_text       TEXT NOT NULL,  -- rolling narrative of focus areas
+  quotes             JSONB,          -- [{text, event_id, event_date}, ...]
+  model              TEXT,
+  generated_at       TIMESTAMPTZ DEFAULT now(),
+  UNIQUE (person_id)
+);
+
+ALTER TABLE meeting_summaries  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE member_summaries   ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "public read" ON meeting_summaries;
+DROP POLICY IF EXISTS "public read" ON member_summaries;
+
+CREATE POLICY "public read" ON meeting_summaries FOR SELECT USING (true);
+CREATE POLICY "public read" ON member_summaries  FOR SELECT USING (true);
+
+-- ---------------------------------------------------------------------------
 -- Indexes for common query patterns
 -- ---------------------------------------------------------------------------
 
@@ -208,3 +242,7 @@ CREATE INDEX IF NOT EXISTS idx_transcripts_status     ON transcripts(status);
 CREATE INDEX IF NOT EXISTS idx_segments_transcript    ON transcript_segments(transcript_id);
 CREATE INDEX IF NOT EXISTS idx_segments_event         ON transcript_segments(event_id);
 CREATE INDEX IF NOT EXISTS idx_segments_person        ON transcript_segments(person_id);
+
+CREATE INDEX IF NOT EXISTS idx_meeting_summaries_event      ON meeting_summaries(event_id);
+CREATE INDEX IF NOT EXISTS idx_meeting_summaries_transcript ON meeting_summaries(transcript_id);
+CREATE INDEX IF NOT EXISTS idx_member_summaries_person      ON member_summaries(person_id);

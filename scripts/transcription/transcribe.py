@@ -198,6 +198,14 @@ def transcribe_one(transcript: dict, api_key: str, audio_file: str | None = None
 
     print(f"  Done. Duration: {last_end:.0f}s, estimated cost: ${cost}")
 
+    # Generate AI summaries if ANTHROPIC_API_KEY is available
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        print(f"  Generating summaries...")
+        from summarize import generate_meeting_summary
+        generate_meeting_summary(eid)
+    else:
+        print(f"  Skipping summaries (ANTHROPIC_API_KEY not set)")
+
 
 def run(transcript_id: int | None = None, event_id: int | None = None, audio_file: str | None = None) -> None:
     client = get_client()

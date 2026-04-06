@@ -4,7 +4,7 @@ Meetings — browse meeting transcripts, filter by speaker and keyword.
 
 import streamlit as st
 
-from utils.db import load_events_with_transcripts, load_segments_for_event
+from utils.db import load_events_with_transcripts, load_segments_for_event, load_meeting_summary
 
 st.title("Meetings & Transcripts")
 st.markdown("Browse council meeting transcripts. Select a meeting to see who said what.")
@@ -33,8 +33,27 @@ labels = [meeting_label(m) for m in meetings]
 selected_label = st.selectbox("Select a meeting", labels)
 selected_meeting = meetings[labels.index(selected_label)]
 
-st.caption(f"event_id={selected_meeting['event_id']}  ·  transcript_id={selected_meeting['transcript_id']}")
 st.divider()
+
+# ---------------------------------------------------------------------------
+# Meeting summary
+# ---------------------------------------------------------------------------
+
+summary = load_meeting_summary(selected_meeting["event_id"])
+if summary:
+    st.subheader("Meeting Summary")
+    st.write(summary["summary_text"])
+
+    member_briefs = summary.get("member_briefs") or {}
+    if member_briefs:
+        with st.expander("Council Member Perspectives"):
+            for person_id_str, brief in member_briefs.items():
+                st.markdown(f"**{brief.get('name', 'Unknown')}**")
+                st.write(brief.get("summary", ""))
+                for quote in brief.get("quotes", []):
+                    st.markdown(f"> {quote}")
+                st.divider()
+    st.divider()
 
 # ---------------------------------------------------------------------------
 # Load segments for selected meeting

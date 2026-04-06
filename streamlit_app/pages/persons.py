@@ -6,7 +6,7 @@ import streamlit as st
 import plotly.express as px
 import pandas as pd
 
-from utils.db import load_council_members, load_votes_for_person, load_segments_for_person
+from utils.db import load_council_members, load_votes_for_person, load_segments_for_person, load_member_summary
 
 # ---------------------------------------------------------------------------
 # Sidebar — council member picker
@@ -74,6 +74,24 @@ col3.metric("Nay", f"{nay_count:,}")
 col4.metric("Absent", f"{absent_count:,}")
 
 st.divider()
+
+# ---------------------------------------------------------------------------
+# Rolling AI summary
+# ---------------------------------------------------------------------------
+
+member_summary = load_member_summary(selected["person_id"])
+if member_summary:
+    with st.expander("About " + selected["person_full_name"], expanded=True):
+        st.write(member_summary["summary_text"])
+        quotes = member_summary.get("quotes") or []
+        if quotes:
+            st.markdown("**Representative quotes:**")
+            for q in quotes:
+                date = q.get("event_date", "")
+                st.markdown(f"> {q['text']}")
+                if date:
+                    st.caption(date)
+    st.divider()
 
 # ---------------------------------------------------------------------------
 # Voting breakdown chart + vote history side by side
