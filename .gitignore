@@ -3,3 +3,4 @@ node_modules/
 streamlit_app/.streamlit/secrets.toml
 __pycache__/
 *.pyc
+scripts/transcription/*.mp3
