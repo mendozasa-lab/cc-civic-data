@@ -125,19 +125,19 @@ if member_summary:
                 if date:
                     st.caption(date)
 
-    if member_summary.get("model"):
-        generated = (member_summary.get("generated_at") or "")[:10]
-        tooltip_lines = (
-            f"<b>Model:</b> {member_summary['model']}<br>"
-            + (f"<b>Generated:</b> {generated}<br>" if generated else "")
-            + "<b>Inputs:</b> All speaker-attributed segments for this member · max 80k chars<br>"
-            + "<b>Speaker labels:</b> Assigned manually per recording"
-        )
-        st.markdown(
-            f'<span class="cc-tooltip">Learn how this was generated.'
-            f'<span class="cc-tooltiptext">{tooltip_lines}</span></span>',
-            unsafe_allow_html=True,
-        )
+    model = member_summary.get("model") or "claude-opus-4-6"
+    generated = (member_summary.get("generated_at") or "")[:10]
+    tooltip_lines = (
+        f"<b>Model:</b> {model}<br>"
+        + (f"<b>Generated:</b> {generated}<br>" if generated else "")
+        + "<b>Inputs:</b> All speaker-attributed segments for this member · max 80k chars<br>"
+        + "<b>Speaker labels:</b> Assigned manually per recording"
+    )
+    st.markdown(
+        f'<span class="cc-tooltip">Learn how this was generated.'
+        f'<span class="cc-tooltiptext">{tooltip_lines}</span></span>',
+        unsafe_allow_html=True,
+    )
 
     st.divider()
 
