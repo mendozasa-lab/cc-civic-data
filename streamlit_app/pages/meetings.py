@@ -1,0 +1,97 @@
+"""
+Meetings — browse meeting transcripts, filter by speaker and keyword.
+"""
+
+import streamlit as st
+
+from utils.db import load_events_with_transcripts, load_segments_for_event
+
+st.title("Meetings & Transcripts")
+st.markdown("Browse council meeting transcripts. Select a meeting to see who said what.")
+
+# ---------------------------------------------------------------------------
+# Load meetings that have completed transcripts
+# ---------------------------------------------------------------------------
+
+with st.spinner("Loading meetings..."):
+    meetings = load_events_with_transcripts()
+
+if not meetings:
+    st.info("No transcripts available yet. Run the transcription pipeline to get started.")
+    st.stop()
+
+# ---------------------------------------------------------------------------
+# Meeting selector
+# ---------------------------------------------------------------------------
+
+def meeting_label(m: dict) -> str:
+    date = m["event_date"] or "Unknown date"
+    body = m["body_name"] or "Meeting"
+    return f"{date} — {body}"
+
+labels = [meeting_label(m) for m in meetings]
+selected_label = st.selectbox("Select a meeting", labels)
+selected_meeting = meetings[labels.index(selected_label)]
+
+st.caption(f"event_id={selected_meeting['event_id']}  ·  transcript_id={selected_meeting['transcript_id']}")
+st.divider()
+
+# ---------------------------------------------------------------------------
+# Load segments for selected meeting
+# ---------------------------------------------------------------------------
+
+with st.spinner("Loading transcript..."):
+    segments_df = load_segments_for_event(selected_meeting["event_id"])
+
+if segments_df.empty:
+    st.info("No transcript segments found for this meeting.")
+    st.stop()
+
+total = len(segments_df)
+speakers = sorted(segments_df["Speaker"].unique())
+
+# ---------------------------------------------------------------------------
+# Filters
+# ---------------------------------------------------------------------------
+
+col_kw, col_sp = st.columns([2, 1])
+with col_kw:
+    keyword = st.text_input("Filter by keyword", placeholder="e.g. budget, zoning, water...")
+with col_sp:
+    speaker_options = ["All speakers"] + speakers
+    selected_speaker = st.selectbox("Filter by speaker", speaker_options)
+
+display_df = segments_df.copy()
+if keyword:
+    display_df = display_df[display_df["Text"].str.contains(keyword, case=False, na=False)]
+if selected_speaker != "All speakers":
+    display_df = display_df[display_df["Speaker"] == selected_speaker]
+
+st.caption(
+    f"Showing {len(display_df):,} of {total:,} segments  ·  {len(speakers)} speaker(s)"
+)
+
+# ---------------------------------------------------------------------------
+# Transcript table
+# ---------------------------------------------------------------------------
+
+def fmt_time(seconds: float) -> str:
+    m = int(seconds // 60)
+    s = int(seconds % 60)
+    return f"{m:02d}:{s:02d}"
+
+show_df = display_df[["start_time", "Speaker", "Text"]].copy()
+show_df["Time"] = show_df["start_time"].apply(fmt_time)
+show_df = show_df[["Time", "Speaker", "Text"]]
+
+st.dataframe(
+    show_df,
+    use_container_width=True,
+    hide_index=True,
+    height=500,
+    column_config={
+        "Time":    st.column_config.TextColumn("Time", width="small"),
+        "Speaker": st.column_config.TextColumn("Speaker", width="medium"),
+        "Text":    st.column_config.TextColumn("Statement"),
+    },
+)
