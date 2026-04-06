@@ -249,15 +249,36 @@ def load_segments_for_event(event_id: int) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def load_meeting_summary(event_id: int) -> dict | None:
-    """Returns meeting summary dict with summary_text and member_briefs, or None."""
+    """Returns meeting summary dict with summary_text, member_briefs, model, and generated_at, or None."""
     client = get_client()
-    result = client.table("meeting_summaries").select("summary_text, member_briefs, generated_at").eq("event_id", event_id).execute()
+    result = client.table("meeting_summaries").select("summary_text, member_briefs, model, generated_at").eq("event_id", event_id).execute()
     return result.data[0] if result.data else None
 
 
 @st.cache_data(ttl=3600)
 def load_member_summary(person_id: int) -> dict | None:
-    """Returns rolling member summary dict with summary_text and quotes, or None."""
+    """Returns rolling member summary dict with summary_text, quotes, model, and generated_at, or None."""
     client = get_client()
-    result = client.table("member_summaries").select("summary_text, quotes, generated_at").eq("person_id", person_id).execute()
+    result = client.table("member_summaries").select("summary_text, quotes, model, generated_at").eq("person_id", person_id).execute()
     return result.data[0] if result.data else None
+
+
+@st.cache_data(ttl=3600)
+def load_transcript_provenance(event_id: int) -> dict | None:
+    """Returns transcript metadata for provenance display, or None."""
+    client = get_client()
+    result = (
+        client.table("transcripts")
+        .select("m3u8_url, duration_seconds, cost_usd, created_at, completed_at")
+        .eq("event_id", event_id)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+@st.cache_data(ttl=3600)
+def load_table_sample(table_name: str, limit: int = 50) -> pd.DataFrame:
+    """Returns first `limit` rows of a table for display on the Transparency page."""
+    client = get_client()
+    result = client.table(table_name).select("*").limit(limit).execute()
+    return pd.DataFrame(result.data)

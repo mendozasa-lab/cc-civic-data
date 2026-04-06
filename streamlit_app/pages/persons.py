@@ -8,6 +8,43 @@ import pandas as pd
 
 from utils.db import load_council_members, load_votes_for_person, load_segments_for_person, load_member_summary
 
+st.markdown("""
+<style>
+.cc-tooltip {
+    position: relative;
+    display: inline-block;
+    border-bottom: 1px dotted #888;
+    cursor: help;
+    color: #888;
+    font-size: 0.85em;
+}
+.cc-tooltip .cc-tooltiptext {
+    visibility: hidden;
+    width: 300px;
+    background-color: #333;
+    color: #fff;
+    text-align: left;
+    padding: 8px 10px;
+    border-radius: 6px;
+    position: absolute;
+    z-index: 9999;
+    bottom: 130%;
+    left: 50%;
+    margin-left: -150px;
+    opacity: 0;
+    transition: opacity 0.2s;
+    font-size: 12px;
+    line-height: 1.6;
+    pointer-events: none;
+    white-space: normal;
+}
+.cc-tooltip:hover .cc-tooltiptext {
+    visibility: visible;
+    opacity: 1;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ---------------------------------------------------------------------------
 # Sidebar — council member picker
 # ---------------------------------------------------------------------------
@@ -87,6 +124,21 @@ if member_summary:
                 st.markdown(f"> {q['text']}")
                 if date:
                     st.caption(date)
+
+    if member_summary.get("model"):
+        generated = (member_summary.get("generated_at") or "")[:10]
+        tooltip_lines = (
+            f"<b>Model:</b> {member_summary['model']}<br>"
+            + (f"<b>Generated:</b> {generated}<br>" if generated else "")
+            + "<b>Inputs:</b> All speaker-attributed segments for this member · max 80k chars<br>"
+            + "<b>Speaker labels:</b> Assigned manually per recording"
+        )
+        st.markdown(
+            f'<span class="cc-tooltip">Learn how this was generated.'
+            f'<span class="cc-tooltiptext">{tooltip_lines}</span></span>',
+            unsafe_allow_html=True,
+        )
+
     st.divider()
 
 # ---------------------------------------------------------------------------

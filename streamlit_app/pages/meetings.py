@@ -4,10 +4,47 @@ Meetings — browse meeting transcripts, filter by speaker and keyword.
 
 import streamlit as st
 
-from utils.db import load_events_with_transcripts, load_segments_for_event, load_meeting_summary
+from utils.db import load_events_with_transcripts, load_segments_for_event, load_meeting_summary, load_transcript_provenance
 
 st.title("Meetings & Transcripts")
 st.markdown("Browse council meeting transcripts. Select a meeting to see who said what.")
+
+st.markdown("""
+<style>
+.cc-tooltip {
+    position: relative;
+    display: inline-block;
+    border-bottom: 1px dotted #888;
+    cursor: help;
+    color: #888;
+    font-size: 0.85em;
+}
+.cc-tooltip .cc-tooltiptext {
+    visibility: hidden;
+    width: 300px;
+    background-color: #333;
+    color: #fff;
+    text-align: left;
+    padding: 8px 10px;
+    border-radius: 6px;
+    position: absolute;
+    z-index: 9999;
+    bottom: 130%;
+    left: 50%;
+    margin-left: -150px;
+    opacity: 0;
+    transition: opacity 0.2s;
+    font-size: 12px;
+    line-height: 1.6;
+    pointer-events: none;
+    white-space: normal;
+}
+.cc-tooltip:hover .cc-tooltiptext {
+    visibility: visible;
+    opacity: 1;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # Load meetings that have completed transcripts
@@ -40,6 +77,7 @@ st.divider()
 # ---------------------------------------------------------------------------
 
 summary = load_meeting_summary(selected_meeting["event_id"])
+provenance = load_transcript_provenance(selected_meeting["event_id"])
 if summary:
     st.subheader("Meeting Summary")
     st.write(summary["summary_text"])
@@ -53,6 +91,29 @@ if summary:
                 for quote in brief.get("quotes", []):
                     st.markdown(f"> {quote}")
                 st.divider()
+
+    if summary.get("model"):
+        generated = (summary.get("generated_at") or "")[:10]
+        duration_str = ""
+        processed_str = ""
+        if provenance:
+            if provenance.get("duration_seconds"):
+                duration_str = f"{int(provenance['duration_seconds'] // 60)} min of audio · "
+            if provenance.get("completed_at"):
+                processed_str = f"Processed {provenance['completed_at'][:10]} · "
+        tooltip_lines = (
+            f"<b>Model:</b> {summary['model']}<br>"
+            + (f"<b>Generated:</b> {generated}<br>" if generated else "")
+            + f"<b>Transcript:</b> {duration_str}{processed_str}ElevenLabs Scribe v2<br>"
+            + "<b>Inputs:</b> Speaker-attributed segments only · max 80k chars<br>"
+            + "<b>Speaker labels:</b> Assigned manually"
+        )
+        st.markdown(
+            f'<span class="cc-tooltip">Learn how this was generated.'
+            f'<span class="cc-tooltiptext">{tooltip_lines}</span></span>',
+            unsafe_allow_html=True,
+        )
+
     st.divider()
 
 # ---------------------------------------------------------------------------
