@@ -1,4 +1,5 @@
 supabase
 python-dotenv
 requests
+requests-toolbelt
 anthropic
