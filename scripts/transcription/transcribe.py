@@ -29,12 +29,15 @@ ELEVENLABS_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 def _upload_with_progress(path: str, label: str, api_key: str) -> requests.Response:
     """Stream a multipart upload to ElevenLabs with progress reporting."""
     total = Path(path).stat().st_size
+    last_reported_mb = [-1]  # mutable container for closure
 
     def _callback(monitor: MultipartEncoderMonitor) -> None:
-        pct = monitor.bytes_read / monitor.len * 100
-        mb_read = monitor.bytes_read / 1_000_000
-        mb_total = total / 1_000_000
-        print(f"\r  Uploading {label}: {mb_read:.1f}/{mb_total:.1f} MB ({pct:.0f}%)", end="", flush=True)
+        mb_read = int(monitor.bytes_read / 1_000_000)
+        if mb_read >= last_reported_mb[0] + 10 or monitor.bytes_read == monitor.len:
+            last_reported_mb[0] = mb_read
+            mb_total = total / 1_000_000
+            pct = monitor.bytes_read / monitor.len * 100
+            print(f"  Uploading {label}: {mb_read}/{mb_total:.0f} MB ({pct:.0f}%)", flush=True)
 
     with open(path, "rb") as f:
         encoder = MultipartEncoder(fields={
@@ -48,9 +51,8 @@ def _upload_with_progress(path: str, label: str, api_key: str) -> requests.Respo
             ELEVENLABS_URL,
             headers={"xi-api-key": api_key, "Content-Type": monitor.content_type},
             data=monitor,
-            timeout=3600,
+            timeout=(60, None),  # 60s connect timeout, no read timeout (processing can take hours)
         )
-    print()  # newline after final progress line
     return resp
 
 
