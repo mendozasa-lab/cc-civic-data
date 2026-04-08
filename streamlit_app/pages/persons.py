@@ -6,7 +6,7 @@ import streamlit as st
 import plotly.express as px
 import pandas as pd
 
-from utils.db import load_council_members, load_votes_for_person, load_segments_for_person, load_member_summary
+from utils.db import load_council_members, load_votes_for_person, load_segments_for_person, load_member_summary, load_events_with_transcripts
 from utils.render import TOOLTIP_CSS, render_statements_table, granicus_quote_link
 
 st.markdown(TOOLTIP_CSS, unsafe_allow_html=True)
@@ -80,6 +80,9 @@ st.divider()
 
 member_summary = load_member_summary(selected["person_id"])
 if member_summary:
+    # Build date → clip_id map for quote links (quotes may not have clip_id stored)
+    date_to_clip = {t["event_date"]: t["clip_id"] for t in load_events_with_transcripts() if t.get("clip_id")}
+
     with st.expander("About " + selected["person_full_name"], expanded=True):
         st.write(member_summary["summary_text"])
         quotes = member_summary.get("quotes") or []
@@ -88,8 +91,9 @@ if member_summary:
             for q in quotes:
                 date = q.get("event_date", "")
                 st.markdown(f"> {q['text']}")
-                link = granicus_quote_link(q.get("clip_id"), q.get("start_time"))
-                caption = date + (f" · " if date and link else "")
+                clip_id = q.get("clip_id") or date_to_clip.get(date)
+                link = granicus_quote_link(clip_id, q.get("start_time"))
+                caption = date + (" · " if date and link else "")
                 if caption or link:
                     st.markdown(caption + link if link else caption, unsafe_allow_html=bool(link))
 

@@ -167,7 +167,7 @@ MEMBER_PROMPT = """\
 You are summarizing a Corpus Christi City Council member's record across multiple meetings.
 
 Council member: {person_name}
-Statements across {n_meetings} meeting(s) (Date | Time | Statement):
+Statements across {n_meetings} meeting(s) (Date | event_id | Time | Statement):
 {statements}
 
 Write a summary of this council member's record. Respond ONLY with valid JSON in exactly this structure:
@@ -226,7 +226,7 @@ def generate_member_summary(person_id: int) -> None:
         date = event.get("event_date", "Unknown")
         mins = int(seg["start_time"] // 60)
         secs = int(seg["start_time"] % 60)
-        lines.append(f"{date} | {mins:02d}:{secs:02d} | {seg['segment_text']}")
+        lines.append(f"{date} | event_id:{seg['event_id']} | {mins:02d}:{secs:02d} | {seg['segment_text']}")
 
     statements_text = "\n".join(lines)
     if len(statements_text) > 80000:
