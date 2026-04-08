@@ -26,22 +26,32 @@ ELEVENLABS_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 UPLOAD_CHUNK = 1024 * 1024  # 1 MB chunks for streaming upload
 
 
-def _file_with_progress(path: str, label: str):
-    """Yield file chunks while printing upload progress to stdout."""
-    total = Path(path).stat().st_size
-    sent = 0
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(UPLOAD_CHUNK)
-            if not chunk:
-                break
-            sent += len(chunk)
-            pct = sent / total * 100
-            mb_sent = sent / 1_000_000
-            mb_total = total / 1_000_000
-            print(f"\r  Uploading {label}: {mb_sent:.1f}/{mb_total:.1f} MB ({pct:.0f}%)", end="", flush=True)
-            yield chunk
-    print()  # newline after final progress line
+class _FileWithProgress:
+    """File-like wrapper that prints upload progress as it's read."""
+
+    def __init__(self, path: str, label: str):
+        self._f = open(path, "rb")
+        self._total = Path(path).stat().st_size
+        self._sent = 0
+        self._label = label
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._f.read(size if size != -1 else UPLOAD_CHUNK)
+        if chunk:
+            self._sent += len(chunk)
+            pct = self._sent / self._total * 100
+            mb_sent = self._sent / 1_000_000
+            mb_total = self._total / 1_000_000
+            print(f"\r  Uploading {self._label}: {mb_sent:.1f}/{mb_total:.1f} MB ({pct:.0f}%)", end="", flush=True)
+        else:
+            print()  # newline after final progress line
+        return chunk
+
+    def __len__(self) -> int:
+        return self._total
+
+    def close(self):
+        self._f.close()
 
 
 def get_api_key() -> str:
@@ -140,17 +150,21 @@ def transcribe_one(transcript: dict, api_key: str, audio_file: str | None = None
             print(f"  Downloaded {size_mb:.1f} MB")
 
         # Upload to ElevenLabs with streaming progress
-        resp = requests.post(
-            ELEVENLABS_URL,
-            headers={"xi-api-key": api_key},
-            data={
-                "model_id": "scribe_v2",
-                "diarize": "true",
-                "timestamps_granularity": "word",
-            },
-            files={"file": (f"event_{eid}.mp3", _file_with_progress(tmp_path, f"event_{eid}.mp3"), "audio/mpeg")},
-            timeout=3600,  # 1 hour — large files take time to upload + transcribe
-        )
+        progress_file = _FileWithProgress(tmp_path, f"event_{eid}.mp3")
+        try:
+            resp = requests.post(
+                ELEVENLABS_URL,
+                headers={"xi-api-key": api_key},
+                data={
+                    "model_id": "scribe_v2",
+                    "diarize": "true",
+                    "timestamps_granularity": "word",
+                },
+                files={"file": (f"event_{eid}.mp3", progress_file, "audio/mpeg")},
+                timeout=3600,  # 1 hour — large files take time to upload + transcribe
+            )
+        finally:
+            progress_file.close()
         resp.raise_for_status()
     except (requests.RequestException, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
         detail = ""
