@@ -146,7 +146,7 @@ def load_segments_for_person(person_id: int) -> pd.DataFrame:
 
     select_str = (
         "segment_id, event_id, speaker_label, start_time, end_time, segment_text, "
-        "events(event_date)"
+        "events(event_date, event_media)"
     )
     data = fetch_all(
         lambda lo, hi: client.table("transcript_segments")
@@ -164,6 +164,7 @@ def load_segments_for_person(person_id: int) -> pd.DataFrame:
         rows.append({
             "segment_id":   s["segment_id"],
             "event_id":     s["event_id"],
+            "clip_id":      event.get("event_media"),
             "Date":         event.get("event_date"),
             "start_time":   s["start_time"],
             "end_time":     s["end_time"],
@@ -186,7 +187,7 @@ def load_events_with_transcripts() -> list[dict]:
     client = get_client()
 
     select_str = (
-        "event_id, event_date, "
+        "event_id, event_date, event_media, "
         "bodies(body_name), "
         "transcripts(transcript_id, status)"
     )
@@ -205,6 +206,7 @@ def load_events_with_transcripts() -> list[dict]:
             "event_date":    e["event_date"],
             "body_name":     body.get("body_name", ""),
             "transcript_id": t["transcript_id"],
+            "clip_id":       e.get("event_media"),
         })
 
     return sorted(results, key=lambda x: x["event_date"] or "", reverse=True)

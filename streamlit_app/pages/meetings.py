@@ -5,46 +5,12 @@ Meetings — browse meeting transcripts, filter by speaker and keyword.
 import streamlit as st
 
 from utils.db import load_events_with_transcripts, load_segments_for_event, load_meeting_summary, load_transcript_provenance
+from utils.render import TOOLTIP_CSS, render_transcript_table, granicus_quote_link
 
 st.title("Meetings & Transcripts")
 st.markdown("Browse council meeting transcripts. Select a meeting to see who said what.")
 
-st.markdown("""
-<style>
-.cc-tooltip {
-    position: relative;
-    display: inline-block;
-    border-bottom: 1px dotted #888;
-    cursor: help;
-    color: #888;
-    font-size: 0.85em;
-}
-.cc-tooltip .cc-tooltiptext {
-    visibility: hidden;
-    width: 300px;
-    background-color: #333;
-    color: #fff;
-    text-align: left;
-    padding: 8px 10px;
-    border-radius: 6px;
-    position: absolute;
-    z-index: 9999;
-    bottom: 130%;
-    left: 50%;
-    margin-left: -150px;
-    opacity: 0;
-    transition: opacity 0.2s;
-    font-size: 12px;
-    line-height: 1.6;
-    pointer-events: none;
-    white-space: normal;
-}
-.cc-tooltip:hover .cc-tooltiptext {
-    visibility: visible;
-    opacity: 1;
-}
-</style>
-""", unsafe_allow_html=True)
+st.markdown(TOOLTIP_CSS, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # Load meetings that have completed transcripts
@@ -76,6 +42,8 @@ st.divider()
 # Meeting summary
 # ---------------------------------------------------------------------------
 
+clip_id = selected_meeting.get("clip_id")
+
 summary = load_meeting_summary(selected_meeting["event_id"])
 provenance = load_transcript_provenance(selected_meeting["event_id"])
 if summary:
@@ -89,7 +57,14 @@ if summary:
                 st.markdown(f"**{brief.get('name', 'Unknown')}**")
                 st.write(brief.get("summary", ""))
                 for quote in brief.get("quotes", []):
-                    st.markdown(f"> {quote}")
+                    if isinstance(quote, dict):
+                        text = quote.get("text", "")
+                        link = granicus_quote_link(clip_id, quote.get("start_time"))
+                        st.markdown(f"> {text}", unsafe_allow_html=False)
+                        if link:
+                            st.markdown(link, unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"> {quote}")
                 st.divider()
 
     if summary.get("model"):
@@ -155,23 +130,4 @@ st.caption(
 # Transcript table
 # ---------------------------------------------------------------------------
 
-def fmt_time(seconds: float) -> str:
-    m = int(seconds // 60)
-    s = int(seconds % 60)
-    return f"{m:02d}:{s:02d}"
-
-show_df = display_df[["start_time", "Speaker", "Text"]].copy()
-show_df["Time"] = show_df["start_time"].apply(fmt_time)
-show_df = show_df[["Time", "Speaker", "Text"]]
-
-st.dataframe(
-    show_df,
-    use_container_width=True,
-    hide_index=True,
-    height=500,
-    column_config={
-        "Time":    st.column_config.TextColumn("Time", width="small"),
-        "Speaker": st.column_config.TextColumn("Speaker", width="medium"),
-        "Text":    st.column_config.TextColumn("Statement"),
-    },
-)
+render_transcript_table(display_df[["start_time", "Speaker", "Text"]], clip_id=clip_id)

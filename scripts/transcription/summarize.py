@@ -55,7 +55,11 @@ Write a structured summary. Respond ONLY with valid JSON in exactly this structu
     "<person_id as string>": {{
       "name": "Full name",
       "summary": "2-4 sentences describing what this council member focused on and their positions",
-      "quotes": ["direct quote 1", "direct quote 2", "direct quote 3"]
+      "quotes": [
+        {{"text": "direct verbatim quote", "start_time": 323}},
+        {{"text": "direct verbatim quote", "start_time": 1205}},
+        {{"text": "direct verbatim quote", "start_time": 2847}}
+      ]
     }}
   }}
 }}
@@ -63,6 +67,7 @@ Write a structured summary. Respond ONLY with valid JSON in exactly this structu
 Rules:
 - Include only council members who actually spoke (exclude City Manager, City Attorney, staff, public commenters)
 - Quotes must be verbatim from the transcript
+- start_time is the integer number of seconds from the beginning of the recording (convert MM:SS from the transcript — e.g. 05:23 → 323)
 - Keep the overview factual and neutral
 - Do not include any text outside the JSON
 """
@@ -162,22 +167,24 @@ MEMBER_PROMPT = """\
 You are summarizing a Corpus Christi City Council member's record across multiple meetings.
 
 Council member: {person_name}
-Statements across {n_meetings} meeting(s) (Date | Statement):
+Statements across {n_meetings} meeting(s) (Date | Time | Statement):
 {statements}
 
 Write a summary of this council member's record. Respond ONLY with valid JSON in exactly this structure:
 {{
   "summary": "3-5 sentences describing what issues this council member consistently focuses on, their general positions and values, and any notable patterns in how they engage",
   "quotes": [
-    {{"text": "verbatim quote", "event_id": 123, "event_date": "YYYY-MM-DD"}},
-    {{"text": "verbatim quote", "event_id": 124, "event_date": "YYYY-MM-DD"}},
-    {{"text": "verbatim quote", "event_id": 125, "event_date": "YYYY-MM-DD"}}
+    {{"text": "verbatim quote", "event_id": 123, "event_date": "YYYY-MM-DD", "start_time": 323}},
+    {{"text": "verbatim quote", "event_id": 124, "event_date": "YYYY-MM-DD", "start_time": 1205}},
+    {{"text": "verbatim quote", "event_id": 125, "event_date": "YYYY-MM-DD", "start_time": 2847}}
   ]
 }}
 
 Rules:
 - Choose 3-5 quotes that best illustrate their record and positions
 - Quotes must be verbatim from the statements provided
+- start_time is the integer number of seconds from the beginning of the recording (convert MM:SS from the statement line — e.g. 05:23 → 323)
+- event_id and event_date must match the statement line the quote came from
 - The summary should be factual, neutral, and based only on the statements provided
 - Do not include any text outside the JSON
 """
@@ -194,9 +201,9 @@ def generate_member_summary(person_id: int) -> None:
         return
     person_name = person.data[0]["person_full_name"]
 
-    # Load all mapped segments for this person, with event dates
+    # Load all mapped segments for this person, with event dates and clip IDs
     segments = client.table("transcript_segments") \
-        .select("segment_text, event_id, events(event_date)") \
+        .select("segment_text, event_id, start_time, events(event_date, event_media)") \
         .eq("person_id", person_id) \
         .order("event_id") \
         .execute().data
@@ -205,12 +212,21 @@ def generate_member_summary(person_id: int) -> None:
         print(f"  No segments for {person_name} (person_id={person_id})")
         return
 
-    # Group by event for context, build statement list
+    # Build clip_id lookup from loaded segments
+    clip_id_map = {
+        s["event_id"]: (s.get("events") or {}).get("event_media")
+        for s in segments
+    }
+
+    # Group by event for context, build statement list with timestamps
     lines = []
     event_ids = sorted({s["event_id"] for s in segments})
     for seg in segments:
-        date = (seg.get("events") or {}).get("event_date", "Unknown")
-        lines.append(f"{date} | {seg['segment_text']}")
+        event = seg.get("events") or {}
+        date = event.get("event_date", "Unknown")
+        mins = int(seg["start_time"] // 60)
+        secs = int(seg["start_time"] % 60)
+        lines.append(f"{date} | {mins:02d}:{secs:02d} | {seg['segment_text']}")
 
     statements_text = "\n".join(lines)
     if len(statements_text) > 80000:
@@ -244,10 +260,17 @@ def generate_member_summary(person_id: int) -> None:
         print(f"  Raw response: {raw[:500]}")
         return
 
+    # Enrich quotes with clip_id for video deep-links
+    quotes = parsed.get("quotes", [])
+    for q in quotes:
+        eid = q.get("event_id")
+        if eid:
+            q["clip_id"] = clip_id_map.get(eid)
+
     client.table("member_summaries").upsert({
         "person_id": person_id,
         "summary_text": parsed.get("summary", ""),
-        "quotes": parsed.get("quotes", []),
+        "quotes": quotes,
         "model": MODEL,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }, on_conflict="person_id").execute()

@@ -18,5 +18,6 @@ pg = st.navigation([
     st.Page("pages/meetings.py",     title="Meetings",      icon="📅"),
     st.Page("pages/persons.py",      title="Persons",       icon="👤"),
     st.Page("pages/transparency.py", title="Transparency",  icon="🔍"),
+    st.Page("pages/map_speakers.py", title="Map Speakers",  icon="🔒"),
 ])
 pg.run()

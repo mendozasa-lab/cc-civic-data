@@ -2,14 +2,14 @@
 
 ## Project Overview
 
-Public civic data platform for Corpus Christi. Pulls all public meeting data from the Legistar API into Supabase (PostgreSQL) and serves it via a public Streamlit app. Also plans to generate diarized transcripts from Granicus video recordings of council meetings.
+Public civic data platform for Corpus Christi. Pulls all public meeting data from the Legistar API into Supabase (PostgreSQL), generates diarized transcripts from Granicus video recordings, and serves everything via a public Streamlit app.
 
 **Three workstreams:**
-1. **Legistar → Supabase sync** — Python scripts call the Legistar API and upsert into Supabase. Scheduled via GitHub Actions. The older Airtable JS scripts in `scripts/` are reference implementations only.
-2. **Streamlit app** — Public-facing app in `streamlit_app/`. Currently shows council member profiles with voting records. Built with Streamlit + supabase-py + Plotly.
-3. **Meeting transcription** — Planned. Fetch Granicus M3U8 URLs, submit to ElevenLabs Scribe v2 for diarized transcription, store segments in Supabase, manually map speaker labels to Person records.
+1. **Legistar → Supabase sync** — Python scripts call the Legistar API and upsert into Supabase. Scheduled via GitHub Actions. The older Airtable JS scripts in `scripts/` are reference implementations only (Airtable retired as of 2026-04-04).
+2. **Streamlit app** — Public-facing app in `streamlit_app/`. Three pages: Meetings (transcript browser + AI summaries), Persons (voting records + rolling AI summaries), Transparency (data provenance). Built with Streamlit + supabase-py + Plotly.
+3. **Meeting transcription** — Working pipeline in `scripts/transcription/`. Fetches Granicus M3U8 URLs, downloads audio via ffmpeg, submits to ElevenLabs Scribe v2 for diarized transcription, stores segments in Supabase, maps speaker labels to Person records, generates AI summaries via Claude.
 
-**Architecture (decided 2026-04-04):** Migrated from Airtable to Supabase after Airtable's 125k record limit became a constraint (transcript segments alone would add ~255k records). Supabase is free tier, unlimited rows, real SQL joins.
+**Architecture (migrated 2026-04-04):** Supabase (PostgreSQL) + Streamlit. Airtable retired — hit 125k record limit; transcript segments alone would add ~255k records. Supabase is free tier, unlimited rows, real SQL joins.
 
 **Historical depth:** All sync scripts prompt for a start date at runtime. Bodies and Persons are full syncs (no date filter). Matters, Events, and downstream tables filter from the user-supplied start date onward.
 
@@ -21,7 +21,9 @@ Public civic data platform for Corpus Christi. Pulls all public meeting data fro
 
 ## Supabase Schema
 
-9 tables mirroring the Legistar data model. Schema: `supabase/schema.sql`. All tables have public read RLS policies (anon key can SELECT, not write).
+13 tables. Schema: `supabase/schema.sql`. All tables have public read RLS policies (anon key can SELECT, not write).
+
+**Legistar tables (synced from API):**
 
 | Table | PK | Foreign Keys |
 |-------|-----|-------------|
@@ -34,6 +36,16 @@ Public civic data platform for Corpus Christi. Pulls all public meeting data fro
 | votes | (vote_id, event_item_id) | event_item_id → event_items, person_id → persons (nullable) |
 | office_records | office_record_id | person_id → persons, body_id → bodies |
 
+**Transcription tables:**
+
+| Table | PK | Notes |
+|-------|-----|-------|
+| transcripts | transcript_id | One per event. status: pending → processing → complete/error |
+| transcript_segments | segment_id | One per speaker turn. person_id null until mapped |
+| speaker_mappings | mapping_id | Maps speaker_label → person_id per transcript |
+| meeting_summaries | summary_id | AI-generated overview + per-member briefs (JSONB) |
+| member_summaries | member_summary_id | Rolling AI narrative per council member |
+
 **Critical: `votes` has a composite PK `(vote_id, event_item_id)`.** Legistar assigns one VoteId per person per meeting — the same VoteId appears on every agenda item voted on that day. VoteId alone is NOT unique.
 
 **Events.event_media** = Granicus clip ID (text). 637 of 1,398 events have a value. Used to extract M3U8 URLs for transcription.
@@ -42,98 +54,70 @@ Public civic data platform for Corpus Christi. Pulls all public meeting data fro
 
 ## Streamlit App
 
-`streamlit_app/` — public-facing app, currently shows council member profiles.
+`streamlit_app/` — public-facing, deployed on Streamlit Community Cloud.
 
-- **`app.py`** — main entry point
+- **`app.py`** — main entry point, navigation
+- **`pages/meetings.py`** — meeting selector in sidebar, AI summary, transcript browser (keyword + speaker filters), provenance tooltip
+- **`pages/persons.py`** — council member profiles, voting record, vote breakdown chart, AI rolling summary with quotes, statements expander
+- **`pages/transparency.py`** — data provenance page explaining data sources and AI methodology
 - **`utils/db.py`** — all Supabase queries with `@st.cache_data(ttl=3600)` caching
 - **`utils/fetch_all()`** — pagination helper; use for ALL Supabase queries to avoid the 1000-row default limit
 - **Credentials:** `streamlit_app/.streamlit/secrets.toml` (gitignored) — needs `SUPABASE_URL` and `SUPABASE_ANON_KEY`
 - **Run:** `cd streamlit_app && python -m streamlit run app.py`
 
-## Sync Script Patterns (established 2026-04-03)
+## Legistar Sync Script Status
 
-All sync scripts follow this pattern. See completed scripts for reference implementations.
+All scripts complete. The JS scripts in `scripts/` were the original Airtable implementations and are kept as reference only. The canonical data is now in Supabase.
 
-- **`remoteFetchAsync`** for all Legistar calls (not `fetch` — CORS blocked)
-- **Pagination** on every endpoint — always use `$top=1000&$skip=N` loop, stop when `page.length < 1000`
-- **`toUtcString(ts)`** — appends `'Z'` to Legistar UTC timestamps for dateTime fields
-- **`toDateString(ts)`** — strips `T00:00:00` for date-only fields (MatterIntroDate etc.)
-- **`emptyToNull(val)`** — converts empty strings to null for email/phone field types
-- **`syncSelectChoices(fieldName, values)`** — adds missing choices to a singleSelect field before writing records (see sync-matters.js)
-- **Upsert** — load existing records by ID into a map, then split into toCreate/toUpdate arrays, batch write at 50
+| Table | Records |
+|-------|---------|
+| bodies | 51 |
+| persons | 5,008 |
+| matters | 9,795 (2020-01-01 onward) |
+| events | 1,398 (2020-01-01 onward) |
+| matter_attachments | 21,305 (~50 fetch errors, skipped) |
+| event_items | 29,749 (136 matter links unresolved — pre-2020) |
+| votes | 42,579 (~105 fetch errors skipped) |
+| office_records | 1,004 |
 
-## Sync Script Status
-
-| Script | Status | Records |
-|--------|--------|---------|
-| `scripts/sync-bodies.js` | ✅ Complete | 51 |
-| `scripts/sync-persons.js` | ✅ Complete | 5,008 |
-| `scripts/sync-matters.js` | ✅ Complete | 9,795 (2020-01-01 onward) |
-| `scripts/sync-events.js` | ✅ Complete | 1,398 (2020-01-01 onward) |
-| `scripts/sync-matter-attachments.js` | ✅ Complete | 21,305 (~50 fetch errors, skipped) |
-| `scripts/sync-event-items.js` | ✅ Complete | 29,749 (136 matter links unresolved — pre-2020) |
-| `scripts/sync-votes.js` | ✅ Complete | 42,579 (~105 fetch errors skipped) |
-| `scripts/sync-office-records.js` | ✅ Complete | 1,004 |
-
-**Running Airtable record count: ~111,069 / 125,000** (all Legistar tables complete)
-
-## Field Types That Cannot Be Created via Script
-
-`formula`, `createdTime`, `rollup`, `count`, `multipleLookupValues`, `autoNumber`,
-`lastModifiedTime`, `button`, `createdBy`, `lastModifiedBy`, `externalSyncSource`, `aiText`
-
-## Batch Operation Limits
-
-**Airtable Scripting API** (used in extension/automation scripts):
-- `createRecordsAsync` — max **50** records per call
-- `updateRecordsAsync` — max **50** records per call
-- `deleteRecordsAsync` — max **50** records per call
-- `selectRecordsAsync` with `recordIds` — max **100** records per call
-
-**Automation scripts** have a **30-second execution timeout** — initial bulk syncs should run as extensions (manual), not automations. Automations are suited for incremental/triggered syncs.
-
-## Sync Strategy
-
-**Upsert pattern:** Each Legistar entity has a unique integer ID. Search Airtable for an existing record matching that ID, update if found, create if not. Use `table.selectRecordsAsync` with a filter to find the existing record.
-
-**Linked record resolution:** To link e.g. an Event to its Body, find the Airtable record ID in Bodies where `BodyId` = `EventBodyId`, then use that Airtable record ID in the link field.
-
-**Sync order** (respects foreign key dependencies): Bodies → Persons → Matters → Events → Matter Attachments → Event Items → Votes → Office Records → Transcripts (separate workflow)
-
-**Incremental sync filter syntax:** `$filter=EventLastModifiedUtc gt datetime'2025-06-01T00:00:00'`
-
-## Transcription Pipeline (planned, not yet built)
+## Transcription Pipeline
 
 **Goal:** "Who said what and when" — diarized, timestamped transcripts linked to Person records.
 
-**Video source:** Granicus (not YouTube). Videos are at `corpuschristi.granicus.com`.
+**Scripts in `scripts/transcription/`:**
+
+| Script | Purpose |
+|--------|---------|
+| `fetch_m3u8.py` | Scrapes Granicus player pages, extracts M3U8 URLs, creates `transcripts` records (status=pending) |
+| `transcribe.py` | Downloads audio via ffmpeg, uploads to ElevenLabs Scribe v2, inserts `transcript_segments`, triggers summarize |
+| `map_speakers.py` | Interactive CLI: shows sample utterances per speaker label, user maps to person_id |
+| `summarize.py` | Generates meeting summaries + rolling member summaries via Claude (claude-opus-4-6) |
+| `supabase_client.py` | Shared Supabase client (service key), `fetch_all()`, `upsert_batch()` helpers |
+
+**Run order:**
+```
+python fetch_m3u8.py [--event-id N]
+python transcribe.py [--event-id N | --transcript-id N | --audio-file path]
+python map_speakers.py --transcript-id N
+python summarize.py [--event-id N | --person-id N]
+```
+
+**Video source:** Granicus (not YouTube).
 - `event_media` field on events holds the Granicus clip ID (e.g. `"2171"`)
 - Player page: `https://corpuschristi.granicus.com/player/clip/{clipId}?view_id=2&redirect=true`
-- Media URL extracted via regex on page source: `video_url="(https://archive-stream\.granicus\.com/[^"]+\.m3u8)"`
+- M3U8 URL extracted via regex: `video_url="(https://archive-stream\.granicus\.com/[^"]+\.m3u8)"`
 
-**Transcription service:** ElevenLabs Scribe v2 (chosen for best WER accuracy at 2.3%)
+**ElevenLabs Scribe v2:**
 - Auth: `xi-api-key` header
 - Endpoint: `POST https://api.elevenlabs.io/v1/speech-to-text`
-- Body: `{ audio_url, model_id: "scribe_v2", diarize: true, timestamps_granularity: "word" }`
-- Returns **word-level** data — must post-process into utterances (group consecutive same-speaker words)
-- Speaker labels: `"speaker_0"`, `"speaker_1"` etc. (not "Speaker A")
-- Timestamps in **decimal seconds** (not milliseconds)
-- Synchronous API — no polling needed; 3-hour files may take several minutes to respond
+- Returns word-level data — post-processed into speaker-turn segments
+- Speaker labels: `"speaker_0"`, `"speaker_1"` etc.
+- Timestamps in decimal seconds
 - Cost: ~$0.40/hr → ~$760 for full 637-meeting backfill
 
-**Data model — transcript_segments table (not yet created in Supabase):**
-One record per speaker turn, linked to transcript, event, and person.
-| Column | Type | Notes |
-|--------|------|-------|
-| transcript_id | integer FK | |
-| event_id | integer FK | denormalized for easy querying |
-| person_id | integer FK | null until speaker mapping step |
-| speaker_label | text | e.g. "speaker_0" |
-| start_time | numeric | decimal seconds |
-| end_time | numeric | decimal seconds |
-| segment_text | text | |
+**Speaker mapping:** ElevenLabs returns arbitrary labels per recording — no cross-recording recognition. User maps labels to Person records after reviewing sample utterances. Mapping stored in `speaker_mappings`; `transcript_segments.person_id` updated in place.
 
-**Speaker mapping:** ElevenLabs returns arbitrary labels per recording — no cross-recording recognition. User maps labels to Person records after reviewing sample utterances. Mapping stored in Supabase.
+**Credentials:** `.env` file — `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`
 
 **Scope:** City Council meetings only, manually triggered per event. ~637 events have a Granicus clip ID.
 

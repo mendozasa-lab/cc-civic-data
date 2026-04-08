@@ -7,43 +7,9 @@ import plotly.express as px
 import pandas as pd
 
 from utils.db import load_council_members, load_votes_for_person, load_segments_for_person, load_member_summary
+from utils.render import TOOLTIP_CSS, render_statements_table, granicus_quote_link
 
-st.markdown("""
-<style>
-.cc-tooltip {
-    position: relative;
-    display: inline-block;
-    border-bottom: 1px dotted #888;
-    cursor: help;
-    color: #888;
-    font-size: 0.85em;
-}
-.cc-tooltip .cc-tooltiptext {
-    visibility: hidden;
-    width: 300px;
-    background-color: #333;
-    color: #fff;
-    text-align: left;
-    padding: 8px 10px;
-    border-radius: 6px;
-    position: absolute;
-    z-index: 9999;
-    bottom: 130%;
-    left: 50%;
-    margin-left: -150px;
-    opacity: 0;
-    transition: opacity 0.2s;
-    font-size: 12px;
-    line-height: 1.6;
-    pointer-events: none;
-    white-space: normal;
-}
-.cc-tooltip:hover .cc-tooltiptext {
-    visibility: visible;
-    opacity: 1;
-}
-</style>
-""", unsafe_allow_html=True)
+st.markdown(TOOLTIP_CSS, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # Sidebar — council member picker
@@ -122,8 +88,10 @@ if member_summary:
             for q in quotes:
                 date = q.get("event_date", "")
                 st.markdown(f"> {q['text']}")
-                if date:
-                    st.caption(date)
+                link = granicus_quote_link(q.get("clip_id"), q.get("start_time"))
+                caption = date + (f" · " if date and link else "")
+                if caption or link:
+                    st.markdown(caption + link if link else caption, unsafe_allow_html=bool(link))
 
     model = member_summary.get("model") or "claude-opus-4-6"
     generated = (member_summary.get("generated_at") or "")[:10]
@@ -222,11 +190,10 @@ with st.expander("Statements"):
         if display_segs.empty:
             st.caption("No statements match that keyword.")
         else:
-            show_segs = display_segs[["Date", "Text", "event_id"]].copy()
+            show_segs = display_segs[["Date", "start_time", "Text", "clip_id"]].copy()
             show_segs["Date"] = show_segs["Date"].dt.strftime("%Y-%m-%d")
             show_segs["Text"] = show_segs["Text"].str[:200]
-            show_segs = show_segs.rename(columns={"event_id": "Meeting ID"})
-            st.dataframe(show_segs, use_container_width=True, hide_index=True, height=350)
+            render_statements_table(show_segs)
             if keyword:
                 st.caption(f"{len(display_segs):,} of {len(segments_df):,} statements shown.")
 
