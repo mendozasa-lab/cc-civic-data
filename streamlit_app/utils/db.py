@@ -275,7 +275,13 @@ def load_transcript_provenance(event_id: int) -> dict | None:
         .eq("event_id", event_id)
         .execute()
     )
-    return result.data[0] if result.data else None
+    if not result.data:
+        return None
+    data = result.data[0]
+    event = client.table("events").select("event_media").eq("event_id", event_id).execute()
+    if event.data:
+        data["clip_id"] = event.data[0].get("event_media")
+    return data
 
 
 @st.cache_data(ttl=3600)

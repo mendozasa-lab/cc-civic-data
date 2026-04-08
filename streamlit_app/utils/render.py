@@ -59,9 +59,10 @@ TOOLTIP_CSS = """
 
 
 def fmt_time(seconds: float) -> str:
-    m = int(seconds // 60)
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
-    return f"{m:02d}:{s:02d}"
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def time_cell(seconds: float, clip_id: Optional[str]) -> str:

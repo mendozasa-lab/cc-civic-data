@@ -42,10 +42,9 @@ st.divider()
 # Meeting summary
 # ---------------------------------------------------------------------------
 
-clip_id = selected_meeting.get("clip_id")
-
 summary = load_meeting_summary(selected_meeting["event_id"])
 provenance = load_transcript_provenance(selected_meeting["event_id"])
+clip_id = selected_meeting.get("clip_id") or (provenance or {}).get("clip_id")
 if summary:
     st.subheader("Meeting Summary")
     st.write(summary["summary_text"])
