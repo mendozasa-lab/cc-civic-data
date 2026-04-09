@@ -38,7 +38,7 @@ def _submit_via_url(audio_url: str, api_key: str) -> str:
             "model_id": "scribe_v2",
             "diarize": "true",
             "timestamps_granularity": "word",
-            "url": audio_url,
+            "audio_url": audio_url,
         },
         timeout=(30, 300),
     )
