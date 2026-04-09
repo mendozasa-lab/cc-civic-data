@@ -33,13 +33,18 @@ TOP_UTTERANCES = 5       # longest segments to send per speaker label
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_transcript(client, transcript_id: int) -> dict:
-    result = client.table("transcripts") \
-        .select("transcript_id, event_id, events(event_date)") \
-        .eq("transcript_id", transcript_id) \
-        .execute()
+def load_transcript(client, transcript_id: int | None = None, event_id: int | None = None) -> dict:
+    q = client.table("transcripts").select("transcript_id, event_id, events(event_date)")
+    if transcript_id:
+        q = q.eq("transcript_id", transcript_id)
+    elif event_id:
+        q = q.eq("event_id", event_id)
+    else:
+        sys.exit("Error: must provide transcript_id or event_id")
+    result = q.execute()
     if not result.data:
-        sys.exit(f"Transcript {transcript_id} not found.")
+        ref = f"event_id={event_id}" if event_id else f"transcript_id={transcript_id}"
+        sys.exit(f"Transcript not found for {ref}.")
     t = result.data[0]
     t["event_date"] = (t.get("events") or {}).get("event_date", "")
     return t
@@ -345,10 +350,11 @@ def store_suggestion(client, transcript_id: int, mapping: dict, status: str) -> 
 # Main
 # ---------------------------------------------------------------------------
 
-def auto_map_transcript(transcript_id: int, dry_run: bool = False) -> None:
+def auto_map_transcript(transcript_id: int | None = None, event_id: int | None = None, dry_run: bool = False) -> None:
     client = get_client()
 
-    transcript = load_transcript(client, transcript_id)
+    transcript = load_transcript(client, transcript_id=transcript_id, event_id=event_id)
+    transcript_id = transcript["transcript_id"]
     event_id = transcript["event_id"]
     event_date = transcript["event_date"]
     print(f"Auto-mapping transcript_id={transcript_id} event_id={event_id} ({event_date})")
@@ -469,21 +475,22 @@ def auto_map_transcript(transcript_id: int, dry_run: bool = False) -> None:
             print(f"  NOT IN RESPONSE:       {', '.join(remaining)}")
 
 
-def run(transcript_id: int | None = None, dry_run: bool = False) -> None:
+def run(transcript_id: int | None = None, event_id: int | None = None, dry_run: bool = False) -> None:
     client = get_client()
 
-    if transcript_id:
-        auto_map_transcript(transcript_id, dry_run=dry_run)
+    if transcript_id or event_id:
+        auto_map_transcript(transcript_id=transcript_id, event_id=event_id, dry_run=dry_run)
     else:
-        # Process all complete transcripts that have unmapped labels
+        # Process all complete transcripts
         result = client.table("transcripts").select("transcript_id").eq("status", "complete").execute()
         for t in result.data:
-            auto_map_transcript(t["transcript_id"], dry_run=dry_run)
+            auto_map_transcript(transcript_id=t["transcript_id"], dry_run=dry_run)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Auto-map speaker labels using Claude.")
-    parser.add_argument("--transcript-id", type=int, help="Process a single transcript")
+    parser.add_argument("--transcript-id", type=int, help="Process a single transcript by transcript ID")
+    parser.add_argument("--event-id", type=int, help="Process a single transcript by event ID")
     parser.add_argument("--dry-run", action="store_true", help="Print suggestions without writing to DB")
     args = parser.parse_args()
-    run(transcript_id=args.transcript_id, dry_run=args.dry_run)
+    run(transcript_id=args.transcript_id, event_id=args.event_id, dry_run=args.dry_run)

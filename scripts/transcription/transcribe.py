@@ -299,7 +299,7 @@ def transcribe_one(transcript: dict, api_key: str, audio_file: str | None = None
     if os.environ.get("ANTHROPIC_API_KEY"):
         print(f"  Auto-mapping speakers...")
         from auto_map_speakers import auto_map_transcript
-        auto_map_transcript(tid)
+        auto_map_transcript(transcript_id=tid)
     else:
         print(f"  Skipping speaker auto-mapping (ANTHROPIC_API_KEY not set)")
 

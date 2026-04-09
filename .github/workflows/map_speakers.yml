@@ -3,8 +3,8 @@ name: Auto-map speakers
 on:
   workflow_dispatch:
     inputs:
-      transcript_id:
-        description: 'Transcript ID (leave blank for all complete transcripts)'
+      event_id:
+        description: 'Event ID (leave blank for all complete transcripts)'
         required: false
         default: ''
       dry_run:
@@ -37,8 +37,8 @@ jobs:
       - name: Run auto speaker mapping
         run: |
           ARGS=""
-          if [ -n "${{ github.event.inputs.transcript_id }}" ]; then
-            ARGS="--transcript-id ${{ github.event.inputs.transcript_id }}"
+          if [ -n "${{ github.event.inputs.event_id }}" ]; then
+            ARGS="--event-id ${{ github.event.inputs.event_id }}"
           fi
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
