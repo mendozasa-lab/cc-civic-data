@@ -95,20 +95,44 @@ def _poll_for_result(transcription_id: str, api_key: str) -> dict:
     raise TimeoutError(f"Transcription {transcription_id} did not complete within {POLL_MAX_WAIT}s")
 
 
-STORAGE_BUCKET = "audio"
-STORAGE_FILENAME = "latest.mp3"
+R2_PUBLIC_BASE = "https://pub-b1d9e555223a4dd3ae4aeea0d7570cc1.r2.dev"
 
 
-def _upload_to_storage(path: str, client) -> str:
-    """Upload MP3 to Supabase Storage, overwriting the previous file. Returns public URL."""
-    print(f"  Uploading audio to Supabase Storage...", flush=True)
-    with open(path, "rb") as f:
-        client.storage.from_(STORAGE_BUCKET).upload(
-            STORAGE_FILENAME,
-            f,
-            file_options={"content-type": "audio/mpeg", "upsert": "true"},
-        )
-    url = client.storage.from_(STORAGE_BUCKET).get_public_url(STORAGE_FILENAME)
+def _upload_to_r2(path: str, filename: str) -> str:
+    """Upload MP3 to Cloudflare R2. Returns public URL."""
+    import boto3
+    from botocore.config import Config
+
+    account_id = os.environ.get("R2_ACCOUNT_ID")
+    access_key = os.environ.get("R2_ACCESS_KEY_ID")
+    secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
+    bucket = os.environ.get("R2_BUCKET", "cc-civic-audio")
+
+    if not all([account_id, access_key, secret_key]):
+        raise RuntimeError("R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY must be set")
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=Config(signature_version="s3v4"),
+        region_name="auto",
+    )
+
+    total = Path(path).stat().st_size
+    uploaded = [0]
+
+    def _progress(bytes_amount: int) -> None:
+        uploaded[0] += bytes_amount
+        pct = uploaded[0] / total * 100
+        mb = uploaded[0] / 1_000_000
+        mb_total = total / 1_000_000
+        print(f"  Uploading to R2: {mb:.0f}/{mb_total:.0f} MB ({pct:.0f}%)", flush=True)
+
+    print(f"  Uploading {filename} to R2...", flush=True)
+    s3.upload_file(path, bucket, filename, Callback=_progress, ExtraArgs={"ContentType": "audio/mpeg"})
+    url = f"{R2_PUBLIC_BASE}/{filename}"
     print(f"  Audio URL: {url}")
     return url
 
@@ -213,6 +237,10 @@ def transcribe_one(transcript: dict, api_key: str, audio_file: str | None = None
                     raise RuntimeError("ffmpeg exited with non-zero status")
                 size_mb = Path(tmp_path).stat().st_size / 1_000_000
                 print(f"  Downloaded {size_mb:.1f} MB")
+
+            # Upload audio to R2 for storage
+            audio_url = _upload_to_r2(tmp_path, f"event_{eid}.mp3")
+            client.table("transcripts").update({"audio_url": audio_url}).eq("transcript_id", tid).execute()
 
             # Submit to ElevenLabs async and save the transcription_id immediately
             el_tid = _submit_async(tmp_path, f"event_{eid}.mp3", api_key)
