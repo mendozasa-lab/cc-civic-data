@@ -102,6 +102,14 @@ python map_speakers.py --transcript-id N
 python summarize.py [--event-id N | --person-id N]
 ```
 
+**GitHub Actions:** `.github/workflows/transcribe.yml` — manually triggered via `workflow_dispatch`. Takes optional `event_id` input; blank = all pending. Runs on `ubuntu-latest` with ffmpeg installed. Use this instead of running locally.
+
+**Known transcription issues:**
+- Some Corpus Christi recordings are 7–9 hours long (not just 2–3hr council meetings) — these produce ~380MB MP3 files
+- ElevenLabs sometimes drops the connection (`RemoteDisconnected`) or returns 500 on large files — retry by resetting `status='pending'` and rerunning
+- To reset a failed transcript: `UPDATE transcripts SET status='pending', error_message=NULL WHERE event_id=N`
+- Upload uses `requests-toolbelt` `MultipartEncoderMonitor` for streaming with progress; timeout is `(60, None)` (no read timeout)
+
 **Video source:** Granicus (not YouTube).
 - `event_media` field on events holds the Granicus clip ID (e.g. `"2171"`)
 - Player page: `https://corpuschristi.granicus.com/player/clip/{clipId}?view_id=2&redirect=true`
