@@ -214,10 +214,6 @@ def transcribe_one(transcript: dict, api_key: str, audio_file: str | None = None
                 size_mb = Path(tmp_path).stat().st_size / 1_000_000
                 print(f"  Downloaded {size_mb:.1f} MB")
 
-            # Upload audio to Supabase Storage for sharing (overwrites previous)
-            audio_url = _upload_to_storage(tmp_path, client)
-            client.table("transcripts").update({"audio_url": audio_url}).eq("transcript_id", tid).execute()
-
             # Submit to ElevenLabs async and save the transcription_id immediately
             el_tid = _submit_async(tmp_path, f"event_{eid}.mp3", api_key)
             client.table("transcripts").update({
