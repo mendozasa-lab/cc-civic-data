@@ -147,15 +147,17 @@ CREATE POLICY "public read" ON office_records     FOR SELECT USING (true);
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS transcripts (
-  transcript_id       SERIAL PRIMARY KEY,
-  event_id            INTEGER NOT NULL REFERENCES events(event_id),
-  m3u8_url            TEXT,
-  status              TEXT DEFAULT 'pending',  -- pending | processing | complete | error
-  error_message       TEXT,
-  duration_seconds    NUMERIC,
-  cost_usd            NUMERIC,
-  created_at          TIMESTAMPTZ DEFAULT now(),
-  completed_at        TIMESTAMPTZ,
+  transcript_id              SERIAL PRIMARY KEY,
+  event_id                   INTEGER NOT NULL REFERENCES events(event_id),
+  m3u8_url                   TEXT,
+  status                     TEXT DEFAULT 'pending',  -- pending | processing | complete | error
+  error_message              TEXT,
+  duration_seconds           NUMERIC,
+  cost_usd                   NUMERIC,
+  created_at                 TIMESTAMPTZ DEFAULT now(),
+  completed_at               TIMESTAMPTZ,
+  elevenlabs_transcription_id TEXT,
+  audio_url                   TEXT,
   UNIQUE (event_id)
 );
 

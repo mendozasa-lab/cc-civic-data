@@ -23,13 +23,16 @@ from supabase_client import get_client, upsert_batch
 
 load_dotenv()
 
-ELEVENLABS_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+ELEVENLABS_SUBMIT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+ELEVENLABS_GET_URL = "https://api.elevenlabs.io/v1/speech-to-text/transcripts/{transcription_id}"
+POLL_INTERVAL = 60   # seconds between polls
+POLL_MAX_WAIT = 7200  # give up after 2 hours
 
 
-def _upload_with_progress(path: str, label: str, api_key: str) -> requests.Response:
-    """Stream a multipart upload to ElevenLabs with progress reporting."""
+def _submit_async(path: str, label: str, api_key: str) -> str:
+    """Upload audio to ElevenLabs async mode. Returns elevenlabs transcription_id immediately."""
     total = Path(path).stat().st_size
-    last_reported_mb = [-1]  # mutable container for closure
+    last_reported_mb = [-1]
 
     def _callback(monitor: MultipartEncoderMonitor) -> None:
         mb_read = int(monitor.bytes_read / 1_000_000)
@@ -44,16 +47,70 @@ def _upload_with_progress(path: str, label: str, api_key: str) -> requests.Respo
             "model_id": "scribe_v2",
             "diarize": "true",
             "timestamps_granularity": "word",
+            "webhook": "true",
             "file": (label, f, "audio/mpeg"),
         })
         monitor = MultipartEncoderMonitor(encoder, _callback)
         resp = requests.post(
-            ELEVENLABS_URL,
-            headers={"xi-api-key": api_key, "Content-Type": monitor.content_type},
+            ELEVENLABS_SUBMIT_URL,
+            headers={
+                "xi-api-key": api_key,
+                "Content-Type": monitor.content_type,
+                "Content-Length": str(monitor.len),
+            },
             data=monitor,
-            timeout=(60, None),  # 60s connect timeout, no read timeout (processing can take hours)
+            timeout=(60, 60),  # short read timeout — response is just a job ID
         )
-    return resp
+    resp.raise_for_status()
+    transcription_id = resp.json()["transcription_id"]
+    print(f"  Submitted. ElevenLabs transcription_id: {transcription_id}")
+    return transcription_id
+
+
+def _poll_for_result(transcription_id: str, api_key: str) -> dict:
+    """Poll ElevenLabs until transcription is complete. Returns full response dict."""
+    url = ELEVENLABS_GET_URL.format(transcription_id=transcription_id)
+    headers = {"xi-api-key": api_key}
+    waited = 0
+    while waited < POLL_MAX_WAIT:
+        print(f"  Polling... ({waited}s elapsed)", flush=True)
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+        except requests.RequestException as e:
+            print(f"  Poll request failed ({e}), will retry")
+            time.sleep(POLL_INTERVAL)
+            waited += POLL_INTERVAL
+            continue
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("words"):
+                return data
+            # 200 but no words yet — still processing
+        elif resp.status_code in (202, 404):
+            pass  # still processing
+        else:
+            print(f"  Unexpected poll response: {resp.status_code} {resp.text[:200]}")
+        time.sleep(POLL_INTERVAL)
+        waited += POLL_INTERVAL
+    raise TimeoutError(f"Transcription {transcription_id} did not complete within {POLL_MAX_WAIT}s")
+
+
+STORAGE_BUCKET = "audio"
+STORAGE_FILENAME = "latest.mp3"
+
+
+def _upload_to_storage(path: str, client) -> str:
+    """Upload MP3 to Supabase Storage, overwriting the previous file. Returns public URL."""
+    print(f"  Uploading audio to Supabase Storage...", flush=True)
+    with open(path, "rb") as f:
+        client.storage.from_(STORAGE_BUCKET).upload(
+            STORAGE_FILENAME,
+            f,
+            file_options={"content-type": "audio/mpeg", "upsert": "true"},
+        )
+    url = client.storage.from_(STORAGE_BUCKET).get_public_url(STORAGE_FILENAME)
+    print(f"  Audio URL: {url}")
+    return url
 
 
 def get_api_key() -> str:
@@ -107,71 +164,92 @@ def _build_segment(speaker: str, words: list) -> dict:
     }
 
 
-def transcribe_one(transcript: dict, api_key: str, audio_file: str | None = None) -> None:
+def transcribe_one(transcript: dict, api_key: str, audio_file: str | None = None, elevenlabs_id: str | None = None) -> None:
     client = get_client()
     tid = transcript["transcript_id"]
     eid = transcript["event_id"]
     m3u8_url = transcript["m3u8_url"]
 
     print(f"Transcribing transcript_id={tid} event_id={eid}")
-    print(f"  M3U8: {m3u8_url}")
 
-    # Mark as processing before the long operation
-    client.table("transcripts").update({"status": "processing"}).eq("transcript_id", tid).execute()
+    # Resume: use a provided elevenlabs_id, or one already saved in DB, or submit fresh
+    el_tid = elevenlabs_id or transcript.get("elevenlabs_transcription_id")
 
-    # Use provided audio file or download via ffmpeg
-    provided_file = audio_file is not None
-    if provided_file:
-        tmp_path = audio_file
-        size_mb = Path(tmp_path).stat().st_size / 1_000_000
-        print(f"  Using provided audio file: {tmp_path} ({size_mb:.1f} MB)")
+    if el_tid:
+        print(f"  Resuming poll for ElevenLabs transcription_id: {el_tid}")
+        client.table("transcripts").update({"status": "processing"}).eq("transcript_id", tid).execute()
     else:
-        tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-        tmp.close()
-        tmp_path = tmp.name
+        print(f"  M3U8: {m3u8_url}")
+        client.table("transcripts").update({"status": "processing"}).eq("transcript_id", tid).execute()
 
-    try:
-        if not provided_file:
-            print(f"  Downloading stream via ffmpeg...")
-            result = subprocess.run(
-                [
-                    "ffmpeg", "-y",
-                    "-loglevel", "error",  # suppress verbose segment-open lines
-                    "-stats",              # but keep the progress line
-                    "-i", m3u8_url,
-                    "-vn",                 # audio only
-                    "-acodec", "mp3",
-                    "-q:a", "4",           # ~165 kbps — good quality, manageable size
-                    tmp_path,
-                ],
-                timeout=7200,  # 2-hour download limit
-            )
-            if result.returncode != 0:
-                raise RuntimeError("ffmpeg exited with non-zero status")
+        # Use provided audio file or download via ffmpeg
+        provided_file = audio_file is not None
+        if provided_file:
+            tmp_path = audio_file
             size_mb = Path(tmp_path).stat().st_size / 1_000_000
-            print(f"  Downloaded {size_mb:.1f} MB")
+            print(f"  Using provided audio file: {tmp_path} ({size_mb:.1f} MB)")
+        else:
+            tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+            tmp.close()
+            tmp_path = tmp.name
 
-        # Upload to ElevenLabs with streaming progress
-        resp = _upload_with_progress(tmp_path, f"event_{eid}.mp3", api_key)
-        resp.raise_for_status()
-    except (requests.RequestException, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
-        detail = ""
-        if isinstance(e, requests.RequestException) and hasattr(e, "response") and e.response is not None:
-            try:
-                detail = f" — {e.response.json()}"
-            except Exception:
-                detail = f" — {e.response.text}"
-        print(f"  Error: {e}{detail}")
+        try:
+            if not provided_file:
+                print(f"  Downloading stream via ffmpeg...")
+                result = subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-loglevel", "error",  # suppress verbose segment-open lines
+                        "-stats",              # but keep the progress line
+                        "-i", m3u8_url,
+                        "-vn",                 # audio only
+                        "-acodec", "mp3",
+                        "-q:a", "4",           # ~165 kbps — good quality, manageable size
+                        tmp_path,
+                    ],
+                    timeout=7200,  # 2-hour download limit
+                )
+                if result.returncode != 0:
+                    raise RuntimeError("ffmpeg exited with non-zero status")
+                size_mb = Path(tmp_path).stat().st_size / 1_000_000
+                print(f"  Downloaded {size_mb:.1f} MB")
+
+            # Upload audio to Supabase Storage for sharing (overwrites previous)
+            audio_url = _upload_to_storage(tmp_path, client)
+            client.table("transcripts").update({"audio_url": audio_url}).eq("transcript_id", tid).execute()
+
+            # Submit to ElevenLabs async and save the transcription_id immediately
+            el_tid = _submit_async(tmp_path, f"event_{eid}.mp3", api_key)
+            client.table("transcripts").update({
+                "elevenlabs_transcription_id": el_tid,
+            }).eq("transcript_id", tid).execute()
+        except (requests.RequestException, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
+            detail = ""
+            if isinstance(e, requests.RequestException) and hasattr(e, "response") and e.response is not None:
+                try:
+                    detail = f" — {e.response.json()}"
+                except Exception:
+                    detail = f" — {e.response.text}"
+            print(f"  Error: {e}{detail}")
+            client.table("transcripts").update({
+                "status": "error",
+                "error_message": str(e)[:500],
+            }).eq("transcript_id", tid).execute()
+            return
+        finally:
+            if not provided_file:
+                Path(tmp_path).unlink(missing_ok=True)
+
+    # Poll until ElevenLabs finishes processing
+    try:
+        data = _poll_for_result(el_tid, api_key)
+    except (TimeoutError, Exception) as e:
+        print(f"  Polling failed: {e}")
         client.table("transcripts").update({
             "status": "error",
             "error_message": str(e)[:500],
         }).eq("transcript_id", tid).execute()
         return
-    finally:
-        if not provided_file:
-            Path(tmp_path).unlink(missing_ok=True)
-
-    data = resp.json()
     words = data.get("words", [])
     print(f"  Got {len(words)} words from ElevenLabs")
 
@@ -226,7 +304,12 @@ def transcribe_one(transcript: dict, api_key: str, audio_file: str | None = None
         print(f"  Skipping summaries (ANTHROPIC_API_KEY not set)")
 
 
-def run(transcript_id: int | None = None, event_id: int | None = None, audio_file: str | None = None) -> None:
+def run(
+    transcript_id: int | None = None,
+    event_id: int | None = None,
+    audio_file: str | None = None,
+    elevenlabs_id: str | None = None,
+) -> None:
     client = get_client()
     api_key = get_api_key()
 
@@ -235,16 +318,34 @@ def run(transcript_id: int | None = None, event_id: int | None = None, audio_fil
     elif event_id:
         result = client.table("transcripts").select("*").eq("event_id", event_id).execute()
     else:
-        result = client.table("transcripts").select("*").eq("status", "pending").execute()
+        # Pick up pending transcripts, plus any processing ones that have a saved elevenlabs_id
+        # (allows resuming a job that crashed mid-poll without re-uploading)
+        pending = client.table("transcripts").select("*").eq("status", "pending").execute().data
+        resumable = (
+            client.table("transcripts").select("*")
+            .eq("status", "processing")
+            .not_.is_("elevenlabs_transcription_id", "null")
+            .execute().data
+        )
+        result_data = pending + resumable
+        transcripts = result_data
+        if not transcripts:
+            print("No pending or resumable transcripts found.")
+            return
+        print(f"Processing {len(transcripts)} transcript(s)")
+        for t in transcripts:
+            transcribe_one(t, api_key, audio_file=audio_file)
+            time.sleep(1)
+        return
 
     transcripts = result.data
     if not transcripts:
-        print("No pending transcripts found.")
+        print("No matching transcripts found.")
         return
 
     print(f"Processing {len(transcripts)} transcript(s)")
     for t in transcripts:
-        transcribe_one(t, api_key, audio_file=audio_file)
+        transcribe_one(t, api_key, audio_file=audio_file, elevenlabs_id=elevenlabs_id)
         time.sleep(1)
 
 
@@ -253,5 +354,11 @@ if __name__ == "__main__":
     parser.add_argument("--transcript-id", type=int, help="Process a single transcript by transcript ID")
     parser.add_argument("--event-id", type=int, help="Process a single transcript by event ID")
     parser.add_argument("--audio-file", type=str, help="Path to pre-downloaded audio file (skips ffmpeg download)")
+    parser.add_argument("--elevenlabs-id", type=str, help="Resume by polling an existing ElevenLabs transcription ID (skips upload)")
     args = parser.parse_args()
-    run(transcript_id=args.transcript_id, event_id=args.event_id, audio_file=args.audio_file)
+    run(
+        transcript_id=args.transcript_id,
+        event_id=args.event_id,
+        audio_file=args.audio_file,
+        elevenlabs_id=args.elevenlabs_id,
+    )
