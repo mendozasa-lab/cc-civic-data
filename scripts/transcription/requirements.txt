@@ -1,6 +1,5 @@
 supabase
 python-dotenv
 requests
-requests-toolbelt
 anthropic
 boto3

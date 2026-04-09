@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
 from dotenv import load_dotenv
 
 from supabase_client import get_client, upsert_batch
@@ -29,42 +28,30 @@ POLL_INTERVAL = 60   # seconds between polls
 POLL_MAX_WAIT = 7200  # give up after 2 hours
 
 
-def _submit_async(path: str, label: str, api_key: str) -> str:
-    """Upload audio to ElevenLabs async mode. Returns elevenlabs transcription_id immediately."""
-    total = Path(path).stat().st_size
-    last_reported_mb = [-1]
-
-    def _callback(monitor: MultipartEncoderMonitor) -> None:
-        mb_read = int(monitor.bytes_read / 1_000_000)
-        if mb_read >= last_reported_mb[0] + 10 or monitor.bytes_read == monitor.len:
-            last_reported_mb[0] = mb_read
-            mb_total = total / 1_000_000
-            pct = monitor.bytes_read / monitor.len * 100
-            print(f"  Uploading {label}: {mb_read}/{mb_total:.0f} MB ({pct:.0f}%)", flush=True)
-
-    with open(path, "rb") as f:
-        encoder = MultipartEncoder(fields={
+def _submit_via_url(audio_url: str, api_key: str) -> str:
+    """Submit audio URL to ElevenLabs. ElevenLabs fetches the file itself.
+    Returns elevenlabs transcription_id."""
+    resp = requests.post(
+        ELEVENLABS_SUBMIT_URL,
+        headers={"xi-api-key": api_key},
+        json={
             "model_id": "scribe_v2",
-            "diarize": "true",
+            "diarize": True,
             "timestamps_granularity": "word",
-            "webhook": "true",
-            "file": (label, f, "audio/mpeg"),
-        })
-        monitor = MultipartEncoderMonitor(encoder, _callback)
-        resp = requests.post(
-            ELEVENLABS_SUBMIT_URL,
-            headers={
-                "xi-api-key": api_key,
-                "Content-Type": monitor.content_type,
-                "Content-Length": str(monitor.len),
-            },
-            data=monitor,
-            timeout=(60, 60),  # short read timeout — response is just a job ID
-        )
+            "url": audio_url,
+        },
+        timeout=(30, 300),
+    )
     resp.raise_for_status()
-    transcription_id = resp.json()["transcription_id"]
-    print(f"  Submitted. ElevenLabs transcription_id: {transcription_id}")
-    return transcription_id
+    data = resp.json()
+    # Response may be synchronous (contains 'words') or async (contains 'transcription_id')
+    if "transcription_id" in data:
+        transcription_id = data["transcription_id"]
+        print(f"  Submitted async. ElevenLabs transcription_id: {transcription_id}")
+        return transcription_id
+    # Synchronous response — wrap it so callers can poll with a fake ID
+    # This shouldn't happen with URL submissions but handle defensively
+    raise RuntimeError(f"Unexpected ElevenLabs response (no transcription_id): {str(data)[:300]}")
 
 
 def _poll_for_result(transcription_id: str, api_key: str) -> dict:
@@ -203,66 +190,86 @@ def transcribe_one(transcript: dict, api_key: str, audio_file: str | None = None
         print(f"  Resuming poll for ElevenLabs transcription_id: {el_tid}")
         client.table("transcripts").update({"status": "processing"}).eq("transcript_id", tid).execute()
     else:
-        print(f"  M3U8: {m3u8_url}")
         client.table("transcripts").update({"status": "processing"}).eq("transcript_id", tid).execute()
 
-        # Use provided audio file or download via ffmpeg
-        provided_file = audio_file is not None
-        if provided_file:
-            tmp_path = audio_file
-            size_mb = Path(tmp_path).stat().st_size / 1_000_000
-            print(f"  Using provided audio file: {tmp_path} ({size_mb:.1f} MB)")
+        # If audio already uploaded to R2, skip downloading from Granicus
+        saved_audio_url = transcript.get("audio_url")
+        if saved_audio_url:
+            print(f"  Audio already in R2: {saved_audio_url}")
+            audio_url = saved_audio_url
         else:
-            tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-            tmp.close()
-            tmp_path = tmp.name
+            print(f"  M3U8: {m3u8_url}")
+
+            # Use provided audio file or download via ffmpeg
+            provided_file = audio_file is not None
+            if provided_file:
+                tmp_path = audio_file
+                size_mb = Path(tmp_path).stat().st_size / 1_000_000
+                print(f"  Using provided audio file: {tmp_path} ({size_mb:.1f} MB)")
+            else:
+                tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+                tmp.close()
+                tmp_path = tmp.name
+
+            try:
+                if not provided_file:
+                    print(f"  Downloading stream via ffmpeg...")
+                    result = subprocess.run(
+                        [
+                            "ffmpeg", "-y",
+                            "-loglevel", "error",
+                            "-stats",
+                            "-i", m3u8_url,
+                            "-vn",
+                            "-acodec", "mp3",
+                            "-q:a", "4",
+                            tmp_path,
+                        ],
+                        timeout=7200,
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError("ffmpeg exited with non-zero status")
+                    size_mb = Path(tmp_path).stat().st_size / 1_000_000
+                    print(f"  Downloaded {size_mb:.1f} MB")
+
+                audio_url = _upload_to_r2(tmp_path, f"event_{eid}.mp3")
+                client.table("transcripts").update({"audio_url": audio_url}).eq("transcript_id", tid).execute()
+            except (requests.RequestException, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
+                detail = ""
+                if isinstance(e, requests.RequestException) and hasattr(e, "response") and e.response is not None:
+                    try:
+                        detail = f" — {e.response.json()}"
+                    except Exception:
+                        detail = f" — {e.response.text}"
+                print(f"  Error: {e}{detail}")
+                client.table("transcripts").update({
+                    "status": "error",
+                    "error_message": str(e)[:500],
+                }).eq("transcript_id", tid).execute()
+                return
+            finally:
+                if not provided_file:
+                    Path(tmp_path).unlink(missing_ok=True)
 
         try:
-            if not provided_file:
-                print(f"  Downloading stream via ffmpeg...")
-                result = subprocess.run(
-                    [
-                        "ffmpeg", "-y",
-                        "-loglevel", "error",  # suppress verbose segment-open lines
-                        "-stats",              # but keep the progress line
-                        "-i", m3u8_url,
-                        "-vn",                 # audio only
-                        "-acodec", "mp3",
-                        "-q:a", "4",           # ~165 kbps — good quality, manageable size
-                        tmp_path,
-                    ],
-                    timeout=7200,  # 2-hour download limit
-                )
-                if result.returncode != 0:
-                    raise RuntimeError("ffmpeg exited with non-zero status")
-                size_mb = Path(tmp_path).stat().st_size / 1_000_000
-                print(f"  Downloaded {size_mb:.1f} MB")
-
-            # Upload audio to R2 for storage
-            audio_url = _upload_to_r2(tmp_path, f"event_{eid}.mp3")
-            client.table("transcripts").update({"audio_url": audio_url}).eq("transcript_id", tid).execute()
-
-            # Submit to ElevenLabs async and save the transcription_id immediately
-            el_tid = _submit_async(tmp_path, f"event_{eid}.mp3", api_key)
+            # Submit R2 URL to ElevenLabs — they fetch the file themselves
+            el_tid = _submit_via_url(audio_url, api_key)
             client.table("transcripts").update({
                 "elevenlabs_transcription_id": el_tid,
             }).eq("transcript_id", tid).execute()
-        except (requests.RequestException, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
+        except (requests.RequestException, RuntimeError) as e:
             detail = ""
             if isinstance(e, requests.RequestException) and hasattr(e, "response") and e.response is not None:
                 try:
                     detail = f" — {e.response.json()}"
                 except Exception:
                     detail = f" — {e.response.text}"
-            print(f"  Error: {e}{detail}")
+            print(f"  Error submitting to ElevenLabs: {e}{detail}")
             client.table("transcripts").update({
                 "status": "error",
                 "error_message": str(e)[:500],
             }).eq("transcript_id", tid).execute()
             return
-        finally:
-            if not provided_file:
-                Path(tmp_path).unlink(missing_ok=True)
 
     # Poll until ElevenLabs finishes processing
     try:
