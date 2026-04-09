@@ -409,21 +409,67 @@ def auto_map_transcript(transcript_id: int | None = None, event_id: int | None =
         },
     }
 
-    print(f"  Calling Claude ({MODEL})...")
-    message = claude.messages.create(
-        model=MODEL,
-        max_tokens=4096,
-        tools=[mapping_tool],
-        tool_choice={"type": "tool", "name": "submit_speaker_mappings"},
-        messages=[{"role": "user", "content": prompt}],
-    )
+    # Pre-filter: labels with BOTH short_time AND early_only are almost certainly
+    # public commenters — auto-store them as unknown without calling Claude.
+    definite_public = {}
+    claude_labels = {}
+    for label, st in labels_to_process.items():
+        flags = st.get("flags", [])
+        has_short = any("short_time" in f for f in flags)
+        has_early = any("early_only" in f for f in flags)
+        if has_short and has_early:
+            definite_public[label] = st
+        else:
+            claude_labels[label] = st
 
-    tool_block = next((b for b in message.content if b.type == "tool_use"), None)
-    if not tool_block:
-        print("  Claude did not call the mapping tool — skipping.")
-        return
+    print(f"  Pre-filtered {len(definite_public)} likely-public labels (short + early_only)")
+    print(f"  Sending {len(claude_labels)} labels to Claude")
 
-    mappings = tool_block.input.get("mappings", [])
+    # Auto-store definite public without calling Claude
+    if not dry_run:
+        for label in definite_public:
+            store_suggestion(client, transcript_id, {
+                "speaker_label": label,
+                "person_id": None,
+                "confidence": "low",
+                "category": "public",
+                "reasoning": "Pre-filtered: short speaking time + only appeared early in meeting",
+            }, status="auto_applied")
+
+    # Batch Claude calls: 30 labels per call
+    BATCH_SIZE = 30
+    all_mappings = []
+    claude_label_list = list(claude_labels.keys())
+    for batch_start in range(0, len(claude_label_list), BATCH_SIZE):
+        batch_keys = claude_label_list[batch_start:batch_start + BATCH_SIZE]
+        batch_stats = {k: claude_labels[k] for k in batch_keys}
+        batch_prompt = build_prompt(batch_stats, evidence, roster, event_date)
+
+        batch_num = batch_start // BATCH_SIZE + 1
+        total_batches = (len(claude_label_list) + BATCH_SIZE - 1) // BATCH_SIZE
+        print(f"  Calling Claude ({MODEL}) — batch {batch_num}/{total_batches} ({len(batch_keys)} labels)...")
+        message = claude.messages.create(
+            model=MODEL,
+            max_tokens=16000,
+            tools=[mapping_tool],
+            tool_choice={"type": "tool", "name": "submit_speaker_mappings"},
+            messages=[{"role": "user", "content": batch_prompt}],
+        )
+
+        stop_reason = message.stop_reason
+        if stop_reason == "max_tokens":
+            print(f"  WARNING: Claude hit max_tokens on batch {batch_num} — some labels may be missing")
+
+        tool_block = next((b for b in message.content if b.type == "tool_use"), None)
+        if not tool_block:
+            print(f"  Claude did not call the mapping tool on batch {batch_num} — skipping batch.")
+            continue
+
+        batch_mappings = tool_block.input.get("mappings", [])
+        print(f"  Batch {batch_num}: {len(batch_mappings)} suggestions")
+        all_mappings.extend(batch_mappings)
+
+    mappings = all_mappings
     print(f"  Claude returned {len(mappings)} suggestions")
 
     # Counters for summary
