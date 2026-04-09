@@ -1,0 +1,50 @@
+name: Auto-map speakers
+
+on:
+  workflow_dispatch:
+    inputs:
+      transcript_id:
+        description: 'Transcript ID (leave blank for all complete transcripts)'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Dry run (print suggestions without writing to DB)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  map-speakers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: scripts/transcription
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run auto speaker mapping
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.transcript_id }}" ]; then
+            ARGS="--transcript-id ${{ github.event.inputs.transcript_id }}"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python auto_map_speakers.py $ARGS
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
