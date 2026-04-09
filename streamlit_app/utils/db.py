@@ -284,6 +284,23 @@ def load_transcript_provenance(event_id: int) -> dict | None:
     return data
 
 
+@st.cache_data(ttl=60)
+def load_suggestions_for_transcript(transcript_id: int) -> list[dict]:
+    """
+    Returns all speaker mapping suggestions for a transcript, joined with person name.
+    Short TTL so the Map Speakers page reflects approvals quickly.
+    """
+    client = get_client()
+    result = (
+        client.table("speaker_mapping_suggestions")
+        .select("suggestion_id, speaker_label, person_id, confidence, category, reasoning, status, persons(person_full_name)")
+        .eq("transcript_id", transcript_id)
+        .order("confidence")  # high → low → medium (alphabetical, acceptable)
+        .execute()
+    )
+    return result.data
+
+
 @st.cache_data(ttl=3600)
 def load_table_sample(table_name: str, limit: int = 50) -> pd.DataFrame:
     """Returns first `limit` rows of a table for display on the Transparency page."""

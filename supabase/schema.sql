@@ -180,17 +180,33 @@ CREATE TABLE IF NOT EXISTS speaker_mappings (
   UNIQUE (transcript_id, speaker_label)
 );
 
+CREATE TABLE IF NOT EXISTS speaker_mapping_suggestions (
+  suggestion_id   SERIAL PRIMARY KEY,
+  transcript_id   INTEGER NOT NULL REFERENCES transcripts(transcript_id),
+  speaker_label   TEXT NOT NULL,
+  person_id       INTEGER REFERENCES persons(person_id),  -- null if public/staff/unknown
+  confidence      TEXT NOT NULL,   -- 'high' | 'medium' | 'low'
+  category        TEXT NOT NULL,   -- 'council' | 'staff' | 'public' | 'unknown'
+  reasoning       TEXT,
+  status          TEXT DEFAULT 'pending',  -- 'pending' | 'approved' | 'rejected' | 'auto_applied'
+  created_at      TIMESTAMPTZ DEFAULT now(),
+  UNIQUE (transcript_id, speaker_label)
+);
+
 ALTER TABLE transcripts          ENABLE ROW LEVEL SECURITY;
-ALTER TABLE transcript_segments  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE speaker_mappings     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE transcript_segments          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE speaker_mappings             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE speaker_mapping_suggestions  ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "public read" ON transcripts;
 DROP POLICY IF EXISTS "public read" ON transcript_segments;
 DROP POLICY IF EXISTS "public read" ON speaker_mappings;
+DROP POLICY IF EXISTS "public read" ON speaker_mapping_suggestions;
 
-CREATE POLICY "public read" ON transcripts         FOR SELECT USING (true);
-CREATE POLICY "public read" ON transcript_segments FOR SELECT USING (true);
-CREATE POLICY "public read" ON speaker_mappings    FOR SELECT USING (true);
+CREATE POLICY "public read" ON transcripts                FOR SELECT USING (true);
+CREATE POLICY "public read" ON transcript_segments        FOR SELECT USING (true);
+CREATE POLICY "public read" ON speaker_mappings           FOR SELECT USING (true);
+CREATE POLICY "public read" ON speaker_mapping_suggestions FOR SELECT USING (true);
 
 -- ---------------------------------------------------------------------------
 -- Summary tables
