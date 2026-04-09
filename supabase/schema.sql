@@ -193,20 +193,35 @@ CREATE TABLE IF NOT EXISTS speaker_mapping_suggestions (
   UNIQUE (transcript_id, speaker_label)
 );
 
-ALTER TABLE transcripts          ENABLE ROW LEVEL SECURITY;
+CREATE TABLE IF NOT EXISTS transcript_entities (
+  entity_id     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  transcript_id INTEGER NOT NULL REFERENCES transcripts(transcript_id),
+  segment_id    INTEGER REFERENCES transcript_segments(segment_id),
+  event_id      INTEGER REFERENCES events(event_id),
+  entity_text   TEXT NOT NULL,
+  entity_type   TEXT NOT NULL,  -- 'person_name', 'organization', 'location', etc.
+  start_char    INTEGER,        -- char offset in full transcript text
+  end_char      INTEGER,
+  created_at    TIMESTAMPTZ DEFAULT now()
+);
+
+ALTER TABLE transcripts                  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE transcript_segments          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE speaker_mappings             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE speaker_mapping_suggestions  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE transcript_entities          ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "public read" ON transcripts;
 DROP POLICY IF EXISTS "public read" ON transcript_segments;
 DROP POLICY IF EXISTS "public read" ON speaker_mappings;
 DROP POLICY IF EXISTS "public read" ON speaker_mapping_suggestions;
+DROP POLICY IF EXISTS "public read" ON transcript_entities;
 
-CREATE POLICY "public read" ON transcripts                FOR SELECT USING (true);
-CREATE POLICY "public read" ON transcript_segments        FOR SELECT USING (true);
-CREATE POLICY "public read" ON speaker_mappings           FOR SELECT USING (true);
+CREATE POLICY "public read" ON transcripts                 FOR SELECT USING (true);
+CREATE POLICY "public read" ON transcript_segments         FOR SELECT USING (true);
+CREATE POLICY "public read" ON speaker_mappings            FOR SELECT USING (true);
 CREATE POLICY "public read" ON speaker_mapping_suggestions FOR SELECT USING (true);
+CREATE POLICY "public read" ON transcript_entities         FOR SELECT USING (true);
 
 -- ---------------------------------------------------------------------------
 -- Summary tables
@@ -264,3 +279,7 @@ CREATE INDEX IF NOT EXISTS idx_segments_person        ON transcript_segments(per
 CREATE INDEX IF NOT EXISTS idx_meeting_summaries_event      ON meeting_summaries(event_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_summaries_transcript ON meeting_summaries(transcript_id);
 CREATE INDEX IF NOT EXISTS idx_member_summaries_person      ON member_summaries(person_id);
+
+CREATE INDEX IF NOT EXISTS idx_entities_transcript          ON transcript_entities(transcript_id);
+CREATE INDEX IF NOT EXISTS idx_entities_event               ON transcript_entities(event_id);
+CREATE INDEX IF NOT EXISTS idx_entities_type_text           ON transcript_entities(entity_type, entity_text);

@@ -1,12 +1,25 @@
 """
 transcribe.py — Submit M3U8 URLs to ElevenLabs Scribe v2 and store transcript segments.
 
+Normal flow (async + webhook):
+  1. Download audio from Granicus M3U8 via ffmpeg → MP3
+  2. Upload MP3 to Cloudflare R2 → public URL
+  3. Submit R2 URL to ElevenLabs with webhook=true → get transcription_id immediately
+  4. Save transcription_id, set status=processing, EXIT
+  5. ElevenLabs POSTs result to Supabase Edge Function when done
+
+Resume / crash recovery flow (--elevenlabs-id):
+  python transcribe.py --event-id N --elevenlabs-id <id>
+  Polls ElevenLabs directly and inserts segments locally (no webhook needed).
+
 Usage:
     python transcribe.py                       # all pending transcripts
-    python transcribe.py --transcript-id 42    # single transcript
+    python transcribe.py --event-id 42         # single event
+    python transcribe.py --event-id 42 --elevenlabs-id abc123  # crash recovery
 """
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -18,44 +31,137 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-from supabase_client import get_client, upsert_batch
+from supabase_client import get_client, fetch_all, upsert_batch
 
 load_dotenv()
 
 ELEVENLABS_SUBMIT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 ELEVENLABS_GET_URL = "https://api.elevenlabs.io/v1/speech-to-text/transcripts/{transcription_id}"
-POLL_INTERVAL = 60   # seconds between polls
+POLL_INTERVAL = 60    # seconds between polls (crash recovery only)
 POLL_MAX_WAIT = 7200  # give up after 2 hours
 
+R2_PUBLIC_BASE = "https://pub-b1d9e555223a4dd3ae4aeea0d7570cc1.r2.dev"
 
-def _submit_via_url(audio_url: str, api_key: str) -> str:
-    """Submit audio URL to ElevenLabs. ElevenLabs fetches the file itself.
-    Returns elevenlabs transcription_id."""
+# Corpus Christi-specific terms that ElevenLabs would likely mishear.
+# Council member names are added dynamically from Supabase.
+SUPPLEMENTAL_KEYTERMS = [
+    # Water supply infrastructure
+    "O.N. Stevens", "Choke Canyon", "Lake Texana", "Mary Rhodes Pipeline",
+    "Inner Harbor", "Harbor Island", "Baffin Bay",
+    # Companies & organizations active in CC water crisis
+    "Acciona Agua", "MasTec Industrial", "Corpus Christi Desal Partners",
+    "Corpus Christi Polymers", "Aquatech", "Evangeline Laguna",
+    "Nueces River Authority", "Lavaca-Navidad River Authority",
+    "Texas Water Development Board",
+    # Agencies & acronyms
+    "TCEQ", "LNRA", "TIRZ", "ETJ", "TPDES", "MS4", "GMA", "GCD", "MGD",
+    # Water policy & technical terms
+    "curtailment", "desalination", "brackish", "brine discharge",
+    "groundwater rights", "wastewater recycling", "dead pool",
+    "surcharge", "interlocal", "disannexation", "platting",
+]
+
+
+# ---------------------------------------------------------------------------
+# Keyterms
+# ---------------------------------------------------------------------------
+
+def load_keyterms(client, event_date: str) -> list[str]:
+    """Build keyterm list: active council member names + supplemental CC terms."""
+    data = fetch_all(
+        client,
+        "office_records",
+        query_fn=lambda: client.table("office_records")
+            .select(
+                "office_record_start_date, office_record_end_date, "
+                "persons(person_full_name, person_first_name, person_last_name), "
+                "bodies(body_name)"
+            ),
+    )
+
+    names: set[str] = set()
+    for r in data:
+        body = (r.get("bodies") or {}).get("body_name", "")
+        if "city council" not in body.lower():
+            continue
+        p = r.get("persons")
+        if not p:
+            continue
+        start = r.get("office_record_start_date") or ""
+        end = r.get("office_record_end_date")
+        if start > event_date:
+            continue
+        if end and end < event_date:
+            continue
+        for name in [p.get("person_first_name"), p.get("person_last_name"), p.get("person_full_name")]:
+            if name and len(name) <= 50:
+                names.add(name)
+
+    all_terms = list(names) + SUPPLEMENTAL_KEYTERMS
+    # Deduplicate and enforce 50-char limit
+    seen: set[str] = set()
+    result = []
+    for term in all_terms:
+        if term and len(term) <= 50 and term not in seen:
+            seen.add(term)
+            result.append(term)
+    return result[:1000]  # ElevenLabs max
+
+
+# ---------------------------------------------------------------------------
+# ElevenLabs submission (async + webhook)
+# ---------------------------------------------------------------------------
+
+def _submit_async(audio_url: str, tid: int, keyterms: list[str], api_key: str) -> str:
+    """Submit audio URL to ElevenLabs with webhook=true.
+    ElevenLabs fetches the file from R2 and POSTs the result to our webhook.
+    Returns transcription_id immediately."""
+
+    webhook_id = os.environ.get("ELEVENLABS_WEBHOOK_ID")
+    if not webhook_id:
+        sys.exit("Error: ELEVENLABS_WEBHOOK_ID must be set. Create a webhook in ElevenLabs dashboard first.")
+
+    fields = {
+        "model_id": "scribe_v2",
+        "diarize": "true",
+        "timestamps_granularity": "word",
+        "cloud_storage_url": audio_url,
+        "webhook": "true",
+        "webhook_id": webhook_id,
+        "webhook_metadata": json.dumps({"transcript_id": tid}),
+        "entity_detection": "pii",
+    }
+
+    # requests doesn't support repeated keys in dict — use list of tuples
+    data: list[tuple[str, str]] = [(k, v) for k, v in fields.items()]
+    for term in keyterms:
+        data.append(("keyterms", term))
+
+    print(f"  Submitting to ElevenLabs (async, {len(keyterms)} keyterms)...", flush=True)
     resp = requests.post(
         ELEVENLABS_SUBMIT_URL,
         headers={"xi-api-key": api_key},
-        data={
-            "model_id": "scribe_v2",
-            "diarize": "true",
-            "timestamps_granularity": "word",
-            "cloud_storage_url": audio_url,
-        },
-        timeout=(30, 300),
+        data=data,
+        timeout=(30, 60),
     )
     resp.raise_for_status()
-    data = resp.json()
-    # Response may be synchronous (contains 'words') or async (contains 'transcription_id')
-    if "transcription_id" in data:
-        transcription_id = data["transcription_id"]
-        print(f"  Submitted async. ElevenLabs transcription_id: {transcription_id}")
-        return transcription_id
-    # Synchronous response — wrap it so callers can poll with a fake ID
-    # This shouldn't happen with URL submissions but handle defensively
-    raise RuntimeError(f"Unexpected ElevenLabs response (no transcription_id): {str(data)[:300]}")
+    result = resp.json()
 
+    transcription_id = result.get("transcription_id")
+    if not transcription_id:
+        raise RuntimeError(f"No transcription_id in ElevenLabs response: {str(result)[:300]}")
+
+    print(f"  Submitted. ElevenLabs transcription_id: {transcription_id}")
+    return transcription_id
+
+
+# ---------------------------------------------------------------------------
+# ElevenLabs polling (crash recovery only)
+# ---------------------------------------------------------------------------
 
 def _poll_for_result(transcription_id: str, api_key: str) -> dict:
-    """Poll ElevenLabs until transcription is complete. Returns full response dict."""
+    """Poll ElevenLabs until transcription is complete. Returns full response dict.
+    Used only for --elevenlabs-id crash recovery, not the normal async flow."""
     url = ELEVENLABS_GET_URL.format(transcription_id=transcription_id)
     headers = {"xi-api-key": api_key}
     waited = 0
@@ -72,18 +178,16 @@ def _poll_for_result(transcription_id: str, api_key: str) -> dict:
             data = resp.json()
             if data.get("words"):
                 return data
-            # 200 but no words yet — still processing
-        elif resp.status_code in (202, 404):
-            pass  # still processing
-        else:
+        elif resp.status_code not in (202, 404):
             print(f"  Unexpected poll response: {resp.status_code} {resp.text[:200]}")
         time.sleep(POLL_INTERVAL)
         waited += POLL_INTERVAL
     raise TimeoutError(f"Transcription {transcription_id} did not complete within {POLL_MAX_WAIT}s")
 
 
-R2_PUBLIC_BASE = "https://pub-b1d9e555223a4dd3ae4aeea0d7570cc1.r2.dev"
-
+# ---------------------------------------------------------------------------
+# R2 upload
+# ---------------------------------------------------------------------------
 
 def _upload_to_r2(path: str, filename: str) -> str:
     """Upload MP3 to Cloudflare R2. Returns public URL."""
@@ -124,18 +228,12 @@ def _upload_to_r2(path: str, filename: str) -> str:
     return url
 
 
-def get_api_key() -> str:
-    key = os.environ.get("ELEVENLABS_API_KEY")
-    if not key:
-        sys.exit("Error: ELEVENLABS_API_KEY must be set in .env")
-    return key
-
+# ---------------------------------------------------------------------------
+# Segment building (used in crash recovery / polling path)
+# ---------------------------------------------------------------------------
 
 def words_to_segments(words: list) -> list:
-    """
-    Group consecutive words with the same speaker_id into speaker-turn segments.
-    Each word dict has: text, start, end, speaker_id (and optionally type).
-    """
+    """Group consecutive words with the same speaker_id into speaker-turn segments."""
     if not words:
         return []
 
@@ -144,13 +242,11 @@ def words_to_segments(words: list) -> list:
     current_words = []
 
     for word in words:
-        # skip non-word tokens (spacing etc.) that lack speaker info
         speaker = word.get("speaker_id") or word.get("speaker")
         if speaker is None:
             if current_words:
                 current_words.append(word)
             continue
-
         if speaker != current_speaker:
             if current_words and current_speaker is not None:
                 segments.append(_build_segment(current_speaker, current_words))
@@ -175,112 +271,135 @@ def _build_segment(speaker: str, words: list) -> dict:
     }
 
 
-def transcribe_one(transcript: dict, api_key: str, audio_file: str | None = None, elevenlabs_id: str | None = None) -> None:
+# ---------------------------------------------------------------------------
+# Helper utilities
+# ---------------------------------------------------------------------------
+
+def get_api_key() -> str:
+    key = os.environ.get("ELEVENLABS_API_KEY")
+    if not key:
+        sys.exit("Error: ELEVENLABS_API_KEY must be set in .env")
+    return key
+
+
+def _handle_request_error(e: Exception) -> str:
+    """Extract detail from a requests error for logging."""
+    if isinstance(e, requests.RequestException) and hasattr(e, "response") and e.response is not None:
+        try:
+            return f" — {e.response.json()}"
+        except Exception:
+            return f" — {e.response.text}"
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Main transcription logic
+# ---------------------------------------------------------------------------
+
+def transcribe_one(
+    transcript: dict,
+    api_key: str,
+    audio_file: str | None = None,
+    elevenlabs_id: str | None = None,
+) -> None:
     client = get_client()
     tid = transcript["transcript_id"]
     eid = transcript["event_id"]
     m3u8_url = transcript["m3u8_url"]
+    event_date = transcript.get("event_date", "")
 
     print(f"Transcribing transcript_id={tid} event_id={eid}")
 
-    # Resume: use a provided elevenlabs_id, or one already saved in DB, or submit fresh
-    el_tid = elevenlabs_id or transcript.get("elevenlabs_transcription_id")
-
-    if el_tid:
-        print(f"  Resuming poll for ElevenLabs transcription_id: {el_tid}")
+    # --- Crash recovery path: poll an existing transcription_id ---
+    el_tid = elevenlabs_id or (
+        transcript.get("elevenlabs_transcription_id") if elevenlabs_id else None
+    )
+    if elevenlabs_id:
+        el_tid = elevenlabs_id
+        print(f"  Crash recovery: polling ElevenLabs transcription_id={el_tid}")
         client.table("transcripts").update({"status": "processing"}).eq("transcript_id", tid).execute()
+        _poll_and_insert(client, tid, eid, el_tid, api_key)
+        return
+
+    # --- Normal async path ---
+    client.table("transcripts").update({"status": "processing"}).eq("transcript_id", tid).execute()
+
+    # Step 1: Get audio URL (upload to R2 if not already there)
+    saved_audio_url = transcript.get("audio_url")
+    if saved_audio_url:
+        print(f"  Audio already in R2: {saved_audio_url}")
+        audio_url = saved_audio_url
     else:
-        client.table("transcripts").update({"status": "processing"}).eq("transcript_id", tid).execute()
-
-        # If audio already uploaded to R2, skip downloading from Granicus
-        saved_audio_url = transcript.get("audio_url")
-        if saved_audio_url:
-            print(f"  Audio already in R2: {saved_audio_url}")
-            audio_url = saved_audio_url
+        print(f"  M3U8: {m3u8_url}")
+        provided_file = audio_file is not None
+        if provided_file:
+            tmp_path = audio_file
+            size_mb = Path(tmp_path).stat().st_size / 1_000_000
+            print(f"  Using provided audio file: {tmp_path} ({size_mb:.1f} MB)")
         else:
-            print(f"  M3U8: {m3u8_url}")
-
-            # Use provided audio file or download via ffmpeg
-            provided_file = audio_file is not None
-            if provided_file:
-                tmp_path = audio_file
-                size_mb = Path(tmp_path).stat().st_size / 1_000_000
-                print(f"  Using provided audio file: {tmp_path} ({size_mb:.1f} MB)")
-            else:
-                tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-                tmp.close()
-                tmp_path = tmp.name
-
-            try:
-                if not provided_file:
-                    print(f"  Downloading stream via ffmpeg...")
-                    result = subprocess.run(
-                        [
-                            "ffmpeg", "-y",
-                            "-loglevel", "error",
-                            "-stats",
-                            "-i", m3u8_url,
-                            "-vn",
-                            "-acodec", "mp3",
-                            "-q:a", "4",
-                            tmp_path,
-                        ],
-                        timeout=7200,
-                    )
-                    if result.returncode != 0:
-                        raise RuntimeError("ffmpeg exited with non-zero status")
-                    size_mb = Path(tmp_path).stat().st_size / 1_000_000
-                    print(f"  Downloaded {size_mb:.1f} MB")
-
-                audio_url = _upload_to_r2(tmp_path, f"event_{eid}.mp3")
-                client.table("transcripts").update({"audio_url": audio_url}).eq("transcript_id", tid).execute()
-            except (requests.RequestException, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
-                detail = ""
-                if isinstance(e, requests.RequestException) and hasattr(e, "response") and e.response is not None:
-                    try:
-                        detail = f" — {e.response.json()}"
-                    except Exception:
-                        detail = f" — {e.response.text}"
-                print(f"  Error: {e}{detail}")
-                client.table("transcripts").update({
-                    "status": "error",
-                    "error_message": str(e)[:500],
-                }).eq("transcript_id", tid).execute()
-                return
-            finally:
-                if not provided_file:
-                    Path(tmp_path).unlink(missing_ok=True)
+            tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+            tmp.close()
+            tmp_path = tmp.name
 
         try:
-            # Submit R2 URL to ElevenLabs — they fetch the file themselves
-            el_tid = _submit_via_url(audio_url, api_key)
-            client.table("transcripts").update({
-                "elevenlabs_transcription_id": el_tid,
-            }).eq("transcript_id", tid).execute()
-        except (requests.RequestException, RuntimeError) as e:
-            detail = ""
-            if isinstance(e, requests.RequestException) and hasattr(e, "response") and e.response is not None:
-                try:
-                    detail = f" — {e.response.json()}"
-                except Exception:
-                    detail = f" — {e.response.text}"
-            print(f"  Error submitting to ElevenLabs: {e}{detail}")
+            if not provided_file:
+                print(f"  Downloading stream via ffmpeg...")
+                result = subprocess.run(
+                    ["ffmpeg", "-y", "-loglevel", "error", "-stats",
+                     "-i", m3u8_url, "-vn", "-acodec", "mp3", "-q:a", "4", tmp_path],
+                    timeout=7200,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError("ffmpeg exited with non-zero status")
+                size_mb = Path(tmp_path).stat().st_size / 1_000_000
+                print(f"  Downloaded {size_mb:.1f} MB")
+
+            audio_url = _upload_to_r2(tmp_path, f"event_{eid}.mp3")
+            client.table("transcripts").update({"audio_url": audio_url}).eq("transcript_id", tid).execute()
+        except (requests.RequestException, subprocess.TimeoutExpired, RuntimeError, OSError) as e:
+            detail = _handle_request_error(e)
+            print(f"  Error: {e}{detail}")
             client.table("transcripts").update({
                 "status": "error",
                 "error_message": str(e)[:500],
             }).eq("transcript_id", tid).execute()
             return
+        finally:
+            if not provided_file:
+                Path(tmp_path).unlink(missing_ok=True)
 
-    # Poll until ElevenLabs finishes processing
+    # Step 2: Load keyterms
+    keyterms = load_keyterms(client, event_date)
+    print(f"  Keyterms: {len(keyterms)} terms ({sum(1 for t in keyterms if t not in SUPPLEMENTAL_KEYTERMS)} council names + {len(SUPPLEMENTAL_KEYTERMS)} supplemental)")
+
+    # Step 3: Submit to ElevenLabs async with webhook
+    try:
+        new_el_tid = _submit_async(audio_url, tid, keyterms, api_key)
+        client.table("transcripts").update({
+            "elevenlabs_transcription_id": new_el_tid,
+        }).eq("transcript_id", tid).execute()
+        print(f"  Submitted. Webhook will handle completion. transcript_id={tid} status=processing")
+    except (requests.RequestException, RuntimeError) as e:
+        detail = _handle_request_error(e)
+        print(f"  Error submitting to ElevenLabs: {e}{detail}")
+        client.table("transcripts").update({
+            "status": "error",
+            "error_message": str(e)[:500],
+        }).eq("transcript_id", tid).execute()
+
+
+def _poll_and_insert(client, tid: int, eid: int, el_tid: str, api_key: str) -> None:
+    """Crash recovery: poll ElevenLabs and insert segments locally (no entity detection)."""
     try:
         data = _poll_for_result(el_tid, api_key)
-    except (TimeoutError, Exception) as e:
+    except Exception as e:
         print(f"  Polling failed: {e}")
         client.table("transcripts").update({
             "status": "error",
             "error_message": str(e)[:500],
         }).eq("transcript_id", tid).execute()
         return
+
     words = data.get("words", [])
     print(f"  Got {len(words)} words from ElevenLabs")
 
@@ -294,7 +413,6 @@ def transcribe_one(transcript: dict, api_key: str, audio_file: str | None = None
         }).eq("transcript_id", tid).execute()
         return
 
-    # Build rows for transcript_segments
     rows = [
         {
             "transcript_id": tid,
@@ -305,17 +423,14 @@ def transcribe_one(transcript: dict, api_key: str, audio_file: str | None = None
             "end_time": s["end_time"],
             "segment_text": s["segment_text"],
         }
-        for s in segments
-        if s["segment_text"]  # skip empty segments
+        for s in segments if s["segment_text"]
     ]
 
     upsert_batch(client, "transcript_segments", rows, batch_size=500)
     print(f"  Inserted {len(rows)} segments")
 
-    # Estimate cost: ElevenLabs charges per character of output
-    # Rough estimate from duration if available
     last_end = segments[-1]["end_time"] if segments else 0
-    cost = round((last_end / 3600) * 0.40, 4)  # ~$0.40/hr
+    cost = round((last_end / 3600) * 0.40, 4)
 
     client.table("transcripts").update({
         "status": "complete",
@@ -324,24 +439,13 @@ def transcribe_one(transcript: dict, api_key: str, audio_file: str | None = None
         "cost_usd": cost,
     }).eq("transcript_id", tid).execute()
 
-    print(f"  Done. Duration: {last_end:.0f}s, estimated cost: ${cost}")
+    print(f"  Done (polling path). Duration: {last_end:.0f}s, estimated cost: ${cost}")
+    print(f"  Note: entity detection not available on polling path. Run auto_map_speakers separately.")
 
-    # Auto-map speaker labels using Claude
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        print(f"  Auto-mapping speakers...")
-        from auto_map_speakers import auto_map_transcript
-        auto_map_transcript(transcript_id=tid)
-    else:
-        print(f"  Skipping speaker auto-mapping (ANTHROPIC_API_KEY not set)")
 
-    # Generate AI summaries if ANTHROPIC_API_KEY is available
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        print(f"  Generating summaries...")
-        from summarize import generate_meeting_summary
-        generate_meeting_summary(eid)
-    else:
-        print(f"  Skipping summaries (ANTHROPIC_API_KEY not set)")
-
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def run(
     transcript_id: int | None = None,
@@ -353,31 +457,29 @@ def run(
     api_key = get_api_key()
 
     if transcript_id:
-        result = client.table("transcripts").select("*").eq("transcript_id", transcript_id).execute()
+        result = client.table("transcripts").select("*, events(event_date)").eq("transcript_id", transcript_id).execute()
     elif event_id:
-        result = client.table("transcripts").select("*").eq("event_id", event_id).execute()
+        result = client.table("transcripts").select("*, events(event_date)").eq("event_id", event_id).execute()
     else:
-        # Pick up pending transcripts, plus any processing ones that have a saved elevenlabs_id
-        # (allows resuming a job that crashed mid-poll without re-uploading)
-        pending = client.table("transcripts").select("*").eq("status", "pending").execute().data
-        resumable = (
-            client.table("transcripts").select("*")
+        pending = client.table("transcripts").select("*, events(event_date)").eq("status", "pending").execute().data
+        # Also pick up processing transcripts without a transcription_id (submit failed, audio already in R2)
+        stalled = (
+            client.table("transcripts").select("*, events(event_date)")
             .eq("status", "processing")
-            .not_.is_("elevenlabs_transcription_id", "null")
+            .is_("elevenlabs_transcription_id", "null")
             .execute().data
         )
-        result_data = pending + resumable
-        transcripts = result_data
+        transcripts = pending + stalled
         if not transcripts:
-            print("No pending or resumable transcripts found.")
+            print("No pending or stalled transcripts found.")
             return
         print(f"Processing {len(transcripts)} transcript(s)")
-        for t in transcripts:
+        for t in _flatten_event_date(transcripts):
             transcribe_one(t, api_key, audio_file=audio_file)
             time.sleep(1)
         return
 
-    transcripts = result.data
+    transcripts = _flatten_event_date(result.data)
     if not transcripts:
         print("No matching transcripts found.")
         return
@@ -388,12 +490,20 @@ def run(
         time.sleep(1)
 
 
+def _flatten_event_date(transcripts: list) -> list:
+    """Move events.event_date up to the transcript dict."""
+    for t in transcripts:
+        events = t.pop("events", None) or {}
+        t["event_date"] = events.get("event_date", "")
+    return transcripts
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Transcribe meetings via ElevenLabs Scribe v2.")
     parser.add_argument("--transcript-id", type=int, help="Process a single transcript by transcript ID")
     parser.add_argument("--event-id", type=int, help="Process a single transcript by event ID")
     parser.add_argument("--audio-file", type=str, help="Path to pre-downloaded audio file (skips ffmpeg download)")
-    parser.add_argument("--elevenlabs-id", type=str, help="Resume by polling an existing ElevenLabs transcription ID (skips upload)")
+    parser.add_argument("--elevenlabs-id", type=str, help="Crash recovery: poll an existing ElevenLabs transcription ID and insert segments locally")
     args = parser.parse_args()
     run(
         transcript_id=args.transcript_id,
