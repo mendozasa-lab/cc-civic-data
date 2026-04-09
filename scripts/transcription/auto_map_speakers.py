@@ -288,18 +288,7 @@ SPEAKER PROFILES:
 {speakers_str}
 
 TASK:
-For each speaker label, identify who they are. Respond ONLY with valid JSON:
-{{
-  "mappings": [
-    {{
-      "speaker_label": "speaker_0",
-      "person_id": 1234,
-      "confidence": "high",
-      "category": "council",
-      "reasoning": "Brief explanation of evidence"
-    }}
-  ]
-}}
+For each speaker label, call the submit_speaker_mappings tool with your identifications.
 
 Rules:
 - person_id: use the integer from the roster, or null for staff/public/unknown
@@ -395,25 +384,46 @@ def auto_map_transcript(transcript_id: int | None = None, event_id: int | None =
     filtered_stats = {k: v for k, v in stats.items() if k in labels_to_process}
     prompt = build_prompt(filtered_stats, evidence, roster, event_date)
 
+    mapping_tool = {
+        "name": "submit_speaker_mappings",
+        "description": "Submit identified speaker label to person mappings",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mappings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "speaker_label": {"type": "string"},
+                            "person_id": {"type": ["integer", "null"]},
+                            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                            "category": {"type": "string", "enum": ["council", "staff", "public", "unknown"]},
+                            "reasoning": {"type": "string"},
+                        },
+                        "required": ["speaker_label", "confidence", "category", "reasoning"],
+                    },
+                }
+            },
+            "required": ["mappings"],
+        },
+    }
+
     print(f"  Calling Claude ({MODEL})...")
     message = claude.messages.create(
         model=MODEL,
         max_tokens=4096,
-        messages=[
-            {"role": "user", "content": prompt},
-            {"role": "assistant", "content": "{"},
-        ],
+        tools=[mapping_tool],
+        tool_choice={"type": "tool", "name": "submit_speaker_mappings"},
+        messages=[{"role": "user", "content": prompt}],
     )
-    # Prefilled assistant turn started with "{" — prepend it back before parsing
-    raw = "{" + message.content[0].text.strip()
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(f"  Failed to parse Claude response: {e}")
-        print(f"  Raw response: {raw[:500]}")
+
+    tool_block = next((b for b in message.content if b.type == "tool_use"), None)
+    if not tool_block:
+        print("  Claude did not call the mapping tool — skipping.")
         return
 
-    mappings = result.get("mappings", [])
+    mappings = tool_block.input.get("mappings", [])
     print(f"  Claude returned {len(mappings)} suggestions")
 
     # Counters for summary
