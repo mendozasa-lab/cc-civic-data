@@ -40,9 +40,10 @@ Public civic data platform for Corpus Christi. Pulls all public meeting data fro
 
 | Table | PK | Notes |
 |-------|-----|-------|
-| transcripts | transcript_id | One per event. status: pending → processing → complete/error |
+| transcripts | transcript_id | One per event. status: pending → processing → complete/error. Also stores `elevenlabs_transcription_id` and `audio_url` |
 | transcript_segments | segment_id | One per speaker turn. person_id null until mapped |
 | speaker_mappings | mapping_id | Maps speaker_label → person_id per transcript |
+| speaker_mapping_suggestions | suggestion_id | Claude's auto-mapping suggestions. status: pending → approved/rejected/auto_applied |
 | meeting_summaries | summary_id | AI-generated overview + per-member briefs (JSONB) |
 | member_summaries | member_summary_id | Rolling AI narrative per council member |
 
@@ -89,26 +90,33 @@ All scripts complete. The JS scripts in `scripts/` were the original Airtable im
 | Script | Purpose |
 |--------|---------|
 | `fetch_m3u8.py` | Scrapes Granicus player pages, extracts M3U8 URLs, creates `transcripts` records (status=pending) |
-| `transcribe.py` | Downloads audio via ffmpeg, uploads to ElevenLabs Scribe v2, inserts `transcript_segments`, triggers summarize |
-| `map_speakers.py` | Interactive CLI: shows sample utterances per speaker label, user maps to person_id |
+| `transcribe.py` | Downloads audio via ffmpeg, submits to ElevenLabs async, polls for result, inserts `transcript_segments`, triggers auto-mapping + summarize |
+| `auto_map_speakers.py` | Uses Claude to identify speaker labels from transcript text; applies high-confidence mappings, stores medium/low in `speaker_mapping_suggestions` |
 | `summarize.py` | Generates meeting summaries + rolling member summaries via Claude (claude-opus-4-6) |
 | `supabase_client.py` | Shared Supabase client (service key), `fetch_all()`, `upsert_batch()` helpers |
 
-**Run order:**
+**Run order (all via GitHub Actions):**
 ```
-python fetch_m3u8.py [--event-id N]
-python transcribe.py [--event-id N | --transcript-id N | --audio-file path]
-python map_speakers.py --transcript-id N
-python summarize.py [--event-id N | --person-id N]
+[transcribe.yml]     → fetch_m3u8.py → transcribe.py → auto_map_speakers.py → summarize.py
+[map_speakers.yml]   → auto_map_speakers.py (standalone, for already-transcribed events)
+[Streamlit admin]    → Map Speakers page: approve/reject suggestions, manual mapping
 ```
 
-**GitHub Actions:** `.github/workflows/transcribe.yml` — manually triggered via `workflow_dispatch`. Takes optional `event_id` input; blank = all pending. Runs on `ubuntu-latest` with ffmpeg installed. Use this instead of running locally.
+**GitHub Actions workflows:**
+- `transcribe.yml` — full pipeline: download → transcribe → auto-map → summarize. Input: `event_id` (blank = all pending)
+- `map_speakers.yml` — auto-mapping only for already-transcribed events. Inputs: `event_id`, `dry_run`
+
+**ElevenLabs async flow (as of 2026-04-08):**
+- Submit with `webhook=true` → returns `elevenlabs_transcription_id` immediately (saved to `transcripts` table)
+- Poll `GET /v1/speech-to-text/transcripts/{id}` every 60s until `words` appears
+- If job crashes mid-poll: next run auto-resumes from saved `elevenlabs_transcription_id` without re-uploading
+- Recovery: `python transcribe.py --event-id N --elevenlabs-id <id>` to pull a stored result
+- To reset a failed transcript: `UPDATE transcripts SET status='pending', error_message=NULL, elevenlabs_transcription_id=NULL WHERE event_id=N`
 
 **Known transcription issues:**
-- Some Corpus Christi recordings are 7–9 hours long (not just 2–3hr council meetings) — these produce ~380MB MP3 files
-- ElevenLabs sometimes drops the connection (`RemoteDisconnected`) or returns 500 on large files — retry by resetting `status='pending'` and rerunning
-- To reset a failed transcript: `UPDATE transcripts SET status='pending', error_message=NULL WHERE event_id=N`
-- Upload uses `requests-toolbelt` `MultipartEncoderMonitor` for streaming with progress; timeout is `(60, None)` (no read timeout)
+- Some recordings are 7–9 hours long — these produce ~380MB MP3 files
+- ElevenLabs charged for processing even if the response connection drops — the async polling approach prevents this by decoupling upload from result retrieval
+- event_id 4086: has had repeated ElevenLabs failures and duplicate charges. ElevenLabs support ticket submitted 2026-04-08. Results may be retrievable via `--elevenlabs-id` if support provides the transcription ID.
 
 **Video source:** Granicus (not YouTube).
 - `event_media` field on events holds the Granicus clip ID (e.g. `"2171"`)
@@ -117,13 +125,17 @@ python summarize.py [--event-id N | --person-id N]
 
 **ElevenLabs Scribe v2:**
 - Auth: `xi-api-key` header
-- Endpoint: `POST https://api.elevenlabs.io/v1/speech-to-text`
+- Submit endpoint: `POST https://api.elevenlabs.io/v1/speech-to-text` (with `webhook=true`)
+- Poll endpoint: `GET https://api.elevenlabs.io/v1/speech-to-text/transcripts/{transcription_id}`
 - Returns word-level data — post-processed into speaker-turn segments
-- Speaker labels: `"speaker_0"`, `"speaker_1"` etc.
+- Speaker labels: `"speaker_0"`, `"speaker_1"` etc. (arbitrary per recording, no cross-recording identity)
 - Timestamps in decimal seconds
 - Cost: ~$0.40/hr → ~$760 for full 637-meeting backfill
+- Results stored for 2 years on ElevenLabs servers
 
-**Speaker mapping:** ElevenLabs returns arbitrary labels per recording — no cross-recording recognition. User maps labels to Person records after reviewing sample utterances. Mapping stored in `speaker_mappings`; `transcript_segments.person_id` updated in place.
+**Speaker mapping:** Two-stage process:
+1. `auto_map_speakers.py` — Claude analyzes transcript text for name mentions (self-introductions, direct address, roll call), applies high-confidence mappings to `speaker_mappings` directly, stores medium/low suggestions in `speaker_mapping_suggestions`
+2. Streamlit Map Speakers admin page — review pending suggestions (approve/reject with Claude's reasoning shown), manually map any remaining unlabeled speakers with enhanced profiles (8 longest utterances, speaking time stats)
 
 **Credentials:** `.env` file — `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`
 
