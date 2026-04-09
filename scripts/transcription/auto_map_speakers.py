@@ -399,14 +399,13 @@ def auto_map_transcript(transcript_id: int | None = None, event_id: int | None =
     message = claude.messages.create(
         model=MODEL,
         max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": "{"},
+        ],
     )
-    raw = message.content[0].text.strip()
-
-    # Parse JSON — strip markdown code fences if present
-    if raw.startswith("```"):
-        raw = re.sub(r"^```[a-z]*\n?", "", raw)
-        raw = re.sub(r"\n?```$", "", raw)
+    # Prefilled assistant turn started with "{" — prepend it back before parsing
+    raw = "{" + message.content[0].text.strip()
     try:
         result = json.loads(raw)
     except json.JSONDecodeError as e:
