@@ -28,6 +28,12 @@ MODEL = "claude-opus-4-6"
 ROLL_CALL_WINDOW = 600   # first 10 minutes
 TOP_UTTERANCES = 5       # longest segments to send per speaker label
 
+# Key recurring staff who may not have current office_records in Legistar.
+# Add person_id + title here when they're a consistent presence at council meetings.
+NAMED_STAFF = [
+    {"person_id": 820, "person_full_name": "Peter Zanoni", "title": "City Manager"},
+]
+
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -61,8 +67,15 @@ def load_segments(client, transcript_id: int) -> list:
     )
 
 
-def load_roster(client, event_date: str) -> list:
-    """Load council members active on the event date."""
+STAFF_TITLES = {"City Manager", "City Secretary", "City Attorney"}
+
+
+def load_roster(client, event_date: str) -> tuple[list, list]:
+    """Load council members and key named staff active on the event date.
+
+    Returns (council_members, staff_members) — both lists have the same shape:
+    {person_id, person_full_name, person_first_name, person_last_name, title}
+    """
     data = fetch_all(
         client,
         "office_records",
@@ -74,31 +87,48 @@ def load_roster(client, event_date: str) -> list:
             ),
     )
 
-    members = {}
+    council = {}
+    staff = {}
     for r in data:
         body = (r.get("bodies") or {}).get("body_name", "")
-        if "city council" not in body.lower():
-            continue
+        title = r.get("office_record_title") or ""
         p = r.get("persons")
         if not p:
             continue
         start = r.get("office_record_start_date") or ""
         end = r.get("office_record_end_date")
-        # Active at event_date: started before or on event_date AND (no end date OR end after event_date)
         if start > event_date:
             continue
         if end and end < event_date:
             continue
         pid = p["person_id"]
-        if pid not in members:
-            members[pid] = {
+        entry = {
+            "person_id": pid,
+            "person_full_name": p["person_full_name"],
+            "person_first_name": p["person_first_name"],
+            "person_last_name": p["person_last_name"],
+            "title": title,
+        }
+        if "city council" in body.lower():
+            if pid not in council:
+                council[pid] = entry
+        elif title in STAFF_TITLES:
+            if pid not in staff:
+                staff[pid] = entry
+
+    # Merge hardcoded named staff (may not have current office_records in Legistar)
+    for s in NAMED_STAFF:
+        pid = s["person_id"]
+        if pid not in staff and pid not in council:
+            staff[pid] = {
                 "person_id": pid,
-                "person_full_name": p["person_full_name"],
-                "person_first_name": p["person_first_name"],
-                "person_last_name": p["person_last_name"],
-                "title": r.get("office_record_title", ""),
+                "person_full_name": s["person_full_name"],
+                "person_first_name": s["person_full_name"].split()[0],
+                "person_last_name": s["person_full_name"].split()[-1],
+                "title": s["title"],
             }
-    return list(members.values())
+
+    return list(council.values()), list(staff.values())
 
 
 def load_existing_mappings(client, transcript_id: int) -> set:
@@ -163,14 +193,14 @@ def compute_flags(stats: dict, meeting_duration: float) -> dict:
     return stats
 
 
-def detect_name_evidence(segments: list, roster: list) -> dict:
+def detect_name_evidence(segments: list, roster: list, staff: list) -> dict:
     """
     Scan all segments for name mentions and self-introductions.
     Returns {speaker_label: {self_intro, addressed_as, roll_call}}
     """
-    # Build name patterns from roster
+    # Build name patterns from roster + staff
     name_patterns = []
-    for m in roster:
+    for m in roster + staff:
         first = m.get("person_first_name") or ""
         last = m.get("person_last_name") or ""
         full = m.get("person_full_name") or ""
@@ -230,11 +260,15 @@ def pick_top_utterances(segs: list, n: int = TOP_UTTERANCES) -> list:
 # Claude prompt
 # ---------------------------------------------------------------------------
 
-def build_prompt(stats: dict, evidence: dict, roster: list, event_date: str) -> str:
+def build_prompt(stats: dict, evidence: dict, roster: list, staff: list, event_date: str) -> str:
     roster_lines = "\n".join(
         f"  person_id={m['person_id']} | {m['person_full_name']} | {m['title']}"
         for m in sorted(roster, key=lambda m: m.get("person_last_name") or "")
     )
+    staff_lines = "\n".join(
+        f"  person_id={m['person_id']} | {m['person_full_name']} | {m['title']}"
+        for m in sorted(staff, key=lambda m: m.get("person_last_name") or "")
+    ) if staff else "  (none on record)"
 
     speaker_blocks = []
     for label in sorted(stats.keys()):
@@ -275,14 +309,15 @@ Longest utterances:
 
     return f"""You are analyzing a Corpus Christi City Council meeting transcript ({event_date}) to identify who each speaker label belongs to.
 
-COUNCIL ROSTER (people who may be in this recording):
+COUNCIL ROSTER (elected members — use these person_ids):
 {roster_lines}
 
-NON-ROSTER STAFF who commonly speak:
-  - City Secretary (reads agenda items, announces vote results, conducts roll call by calling names)
-  - City Manager
-  - City Attorney
-  - Other city staff
+KEY NAMED STAFF (also identifiable — use these person_ids):
+{staff_lines}
+
+OTHER STAFF who commonly speak but are NOT in the roster above:
+  - City Attorney (if not listed above)
+  - Other department heads, directors, consultants
 
 SPEAKER PROFILES:
 {speakers_str}
@@ -291,12 +326,13 @@ TASK:
 For each speaker label, call the submit_speaker_mappings tool with your identifications.
 
 Rules:
-- person_id: use the integer from the roster, or null for staff/public/unknown
+- person_id: use the integer from the council roster OR the key named staff list above; null for unlisted staff/public/unknown
 - confidence:
     "high" = direct name evidence (self-introduction, named by another speaker, roll call response match)
     "medium" = role inference (makes motions/seconds, votes, prolonged engagement throughout the full meeting)
     "low" = weak signal only (speaking style, general patterns)
 - category: "council" | "staff" | "public" | "unknown"
+- Named staff (City Manager, City Secretary, etc.) should be treated the same as council members — assign their person_id and use "high" confidence when there is direct name evidence
 - For labels with the "short_time" flag: consider whether this could be a voice split from another council member label (ElevenLabs sometimes assigns the same person two labels)
 - Public commenters typically: appear only in a concentrated window, speak once for 2-5 minutes, never make motions
 - The City Secretary often: calls roll (reads names, gets "present"/"here" responses), announces vote tallies, reads agenda item titles
@@ -353,8 +389,8 @@ def auto_map_transcript(transcript_id: int | None = None, event_id: int | None =
         print("  No segments found — skipping.")
         return
 
-    roster = load_roster(client, event_date)
-    print(f"  Roster: {len(roster)} active council members")
+    roster, staff = load_roster(client, event_date)
+    print(f"  Roster: {len(roster)} active council members, {len(staff)} named staff")
 
     already_mapped = load_existing_mappings(client, transcript_id)
     already_suggested = load_existing_suggestions(client, transcript_id)
@@ -372,7 +408,7 @@ def auto_map_transcript(transcript_id: int | None = None, event_id: int | None =
 
     print(f"  Processing {len(labels_to_process)} labels ({len(skip_labels)} already handled)")
 
-    evidence = detect_name_evidence(segments, roster)
+    evidence = detect_name_evidence(segments, roster, staff)
 
     # Call Claude
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -382,7 +418,7 @@ def auto_map_transcript(transcript_id: int | None = None, event_id: int | None =
 
     # Build prompt with only the labels we're processing
     filtered_stats = {k: v for k, v in stats.items() if k in labels_to_process}
-    prompt = build_prompt(filtered_stats, evidence, roster, event_date)
+    prompt = build_prompt(filtered_stats, evidence, roster, staff, event_date)
 
     mapping_tool = {
         "name": "submit_speaker_mappings",
@@ -443,7 +479,7 @@ def auto_map_transcript(transcript_id: int | None = None, event_id: int | None =
     for batch_start in range(0, len(claude_label_list), BATCH_SIZE):
         batch_keys = claude_label_list[batch_start:batch_start + BATCH_SIZE]
         batch_stats = {k: claude_labels[k] for k in batch_keys}
-        batch_prompt = build_prompt(batch_stats, evidence, roster, event_date)
+        batch_prompt = build_prompt(batch_stats, evidence, roster, staff, event_date)
 
         batch_num = batch_start // BATCH_SIZE + 1
         total_batches = (len(claude_label_list) + BATCH_SIZE - 1) // BATCH_SIZE
@@ -489,7 +525,7 @@ def auto_map_transcript(transcript_id: int | None = None, event_id: int | None =
         reasoning = m.get("reasoning", "")
 
         if not dry_run:
-            if confidence == "high" and person_id and category == "council":
+            if confidence == "high" and person_id and category in ("council", "staff"):
                 apply_mapping(client, transcript_id, label, person_id)
                 store_suggestion(client, transcript_id, m, status="auto_applied")
                 auto_applied.append((label, person_id, reasoning))
