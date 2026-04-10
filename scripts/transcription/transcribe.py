@@ -401,7 +401,8 @@ def _poll_and_insert(client, tid: int, eid: int, el_tid: str, api_key: str) -> N
         return
 
     words = data.get("words", [])
-    print(f"  Got {len(words)} words from ElevenLabs")
+    entities = data.get("entities") or []
+    print(f"  Got {len(words)} words, {len(entities)} entities from ElevenLabs")
 
     segments = words_to_segments(words)
     print(f"  Post-processed into {len(segments)} speaker-turn segments")
@@ -429,6 +430,54 @@ def _poll_and_insert(client, tid: int, eid: int, el_tid: str, api_key: str) -> N
     upsert_batch(client, "transcript_segments", rows, batch_size=500)
     print(f"  Inserted {len(rows)} segments")
 
+    # Insert entities if present — map char offsets to segment_ids
+    if entities:
+        # Fetch back the inserted segment_ids (in start_time order)
+        db_segs = fetch_all(
+            client,
+            "transcript_segments",
+            query_fn=lambda: client.table("transcript_segments")
+                .select("segment_id, segment_text, start_time")
+                .eq("transcript_id", tid)
+                .order("start_time"),
+        )
+        # Rebuild char offsets (same logic as Edge Function / import_entities.py)
+        char_offset = 0
+        enriched = []
+        for seg in db_segs:
+            text = seg["segment_text"]
+            enriched.append({
+                "segment_id": seg["segment_id"],
+                "char_start": char_offset,
+                "char_end": char_offset + len(text),
+            })
+            char_offset += len(text) + 1
+
+        def _find_seg(start_char, end_char):
+            best_id, best_overlap = None, 0
+            for s in enriched:
+                if start_char >= s["char_start"] and end_char <= s["char_end"]:
+                    return s["segment_id"]
+                overlap = min(end_char, s["char_end"]) - max(start_char, s["char_start"])
+                if overlap > best_overlap:
+                    best_overlap, best_id = overlap, s["segment_id"]
+            return best_id
+
+        entity_rows = [
+            {
+                "transcript_id": tid,
+                "event_id": eid,
+                "segment_id": _find_seg(e.get("start_char", 0), e.get("end_char", 0)),
+                "entity_text": e.get("text", ""),
+                "entity_type": e.get("entity_type", ""),
+                "start_char": e.get("start_char"),
+                "end_char": e.get("end_char"),
+            }
+            for e in entities
+        ]
+        upsert_batch(client, "transcript_entities", entity_rows, batch_size=500)
+        print(f"  Inserted {len(entity_rows)} entities")
+
     last_end = segments[-1]["end_time"] if segments else 0
     cost = round((last_end / 3600) * 0.40, 4)
 
@@ -440,7 +489,6 @@ def _poll_and_insert(client, tid: int, eid: int, el_tid: str, api_key: str) -> N
     }).eq("transcript_id", tid).execute()
 
     print(f"  Done (polling path). Duration: {last_end:.0f}s, estimated cost: ${cost}")
-    print(f"  Note: entity detection not available on polling path. Run auto_map_speakers separately.")
 
 
 # ---------------------------------------------------------------------------
