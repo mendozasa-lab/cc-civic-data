@@ -21,7 +21,7 @@ Public civic data platform for Corpus Christi. Pulls all public meeting data fro
 
 ## Supabase Schema
 
-13 tables. Schema: `supabase/schema.sql`. All tables have public read RLS policies (anon key can SELECT, not write).
+14 tables. Schema: `supabase/schema.sql`. All tables have public read RLS policies (anon key can SELECT, not write).
 
 **Legistar tables (synced from API):**
 
@@ -40,10 +40,11 @@ Public civic data platform for Corpus Christi. Pulls all public meeting data fro
 
 | Table | PK | Notes |
 |-------|-----|-------|
-| transcripts | transcript_id | One per event. status: pending → processing → complete/error. Also stores `elevenlabs_transcription_id` and `audio_url` |
+| transcripts | transcript_id | One per event. status: pending → processing → complete/error. Stores `elevenlabs_transcription_id` and `audio_url` (R2 public URL) |
 | transcript_segments | segment_id | One per speaker turn. person_id null until mapped |
 | speaker_mappings | mapping_id | Maps speaker_label → person_id per transcript |
 | speaker_mapping_suggestions | suggestion_id | Claude's auto-mapping suggestions. status: pending → approved/rejected/auto_applied |
+| transcript_entities | entity_id | Named entities (PII mode) from ElevenLabs. Char offsets mapped to segment_id |
 | meeting_summaries | summary_id | AI-generated overview + per-member briefs (JSONB) |
 | member_summaries | member_summary_id | Rolling AI narrative per council member |
 
@@ -90,58 +91,97 @@ All scripts complete. The JS scripts in `scripts/` were the original Airtable im
 | Script | Purpose |
 |--------|---------|
 | `fetch_m3u8.py` | Scrapes Granicus player pages, extracts M3U8 URLs, creates `transcripts` records (status=pending) |
-| `transcribe.py` | Downloads audio via ffmpeg, submits to ElevenLabs async, polls for result, inserts `transcript_segments`, triggers auto-mapping + summarize |
+| `transcribe.py` | Downloads audio via ffmpeg, uploads to R2, submits to ElevenLabs async with webhook; exits after submission. Segment insertion handled by Edge Function. |
 | `auto_map_speakers.py` | Uses Claude to identify speaker labels from transcript text; applies high-confidence mappings, stores medium/low in `speaker_mapping_suggestions` |
 | `summarize.py` | Generates meeting summaries + rolling member summaries via Claude (claude-opus-4-6) |
 | `supabase_client.py` | Shared Supabase client (service key), `fetch_all()`, `upsert_batch()` helpers |
 
-**Run order (all via GitHub Actions):**
+**Run order:**
 ```
-[transcribe.yml]     → fetch_m3u8.py → transcribe.py → auto_map_speakers.py → summarize.py
-[map_speakers.yml]   → auto_map_speakers.py (standalone, for already-transcribed events)
-[Streamlit admin]    → Map Speakers page: approve/reject suggestions, manual mapping
+[transcribe.yml GitHub Action]
+  → fetch_m3u8.py → transcribe.py (exits after ElevenLabs submission)
+
+[ElevenLabs webhook → Supabase Edge Function: elevenlabs-webhook]
+  → insert transcript_segments + transcript_entities
+  → mark transcript complete
+  → dispatch map_speakers GitHub Actions workflow
+
+[map_speakers.yml GitHub Action] (dispatched by Edge Function or manually)
+  → auto_map_speakers.py
+
+[Streamlit admin]
+  → Map Speakers page: approve/reject suggestions, manual mapping
 ```
 
 **GitHub Actions workflows:**
-- `transcribe.yml` — full pipeline: download → transcribe → auto-map → summarize. Input: `event_id` (blank = all pending)
-- `map_speakers.yml` — auto-mapping only for already-transcribed events. Inputs: `event_id`, `dry_run`
+- `transcribe.yml` — fetch M3U8s + submit to ElevenLabs. Input: `event_id` (blank = all pending). Does NOT insert segments (webhook does that).
+- `map_speakers.yml` — auto-mapping only. Dispatched automatically by Edge Function after webhook, or manually. Inputs: `event_id`, `dry_run`
 
-**ElevenLabs async flow (as of 2026-04-08):**
-- Submit with `webhook=true` → returns `elevenlabs_transcription_id` immediately (saved to `transcripts` table)
-- Poll `GET /v1/speech-to-text/transcripts/{id}` every 60s until `words` appears
-- If job crashes mid-poll: next run auto-resumes from saved `elevenlabs_transcription_id` without re-uploading
-- Recovery: `python transcribe.py --event-id N --elevenlabs-id <id>` to pull a stored result
-- To reset a failed transcript: `UPDATE transcripts SET status='pending', error_message=NULL, elevenlabs_transcription_id=NULL WHERE event_id=N`
+**ElevenLabs async+webhook flow (as of 2026-04-09):**
+1. `transcribe.py` downloads audio via ffmpeg, uploads MP3 to Cloudflare R2, saves public URL to `transcripts.audio_url`
+2. Submits to ElevenLabs with `cloud_storage_url` (R2 URL), `webhook=true`, `webhook_id`, `webhook_metadata={"transcript_id": N}`, `entity_detection=pii`, and keyterms
+3. Saves `elevenlabs_transcription_id`, sets status=processing, exits — GitHub Action completes in <2 min
+4. ElevenLabs POSTs full result to Supabase Edge Function `elevenlabs-webhook` when done
+5. Edge Function inserts segments + entities, marks complete, dispatches `map_speakers`
 
-**Known transcription issues:**
-- Some recordings are 7–9 hours long — these produce ~380MB MP3 files
-- ElevenLabs charged for processing even if the response connection drops — the async polling approach prevents this by decoupling upload from result retrieval
-- event_id 4086: has had repeated ElevenLabs failures and duplicate charges. ElevenLabs support ticket submitted 2026-04-08. Results may be retrievable via `--elevenlabs-id` if support provides the transcription ID.
+**Crash recovery:** If job submission succeeds but Edge Function never fires:
+- `python transcribe.py --event-id N --elevenlabs-id <id>` — polls ElevenLabs directly and inserts segments locally (no entities on this path)
+- To reset fully: `UPDATE transcripts SET status='pending', error_message=NULL, elevenlabs_transcription_id=NULL, audio_url=NULL WHERE event_id=N`
+- To re-run from existing R2 audio (skip re-upload): `audio_url` is preserved; transcribe.py skips upload if set
 
-**Video source:** Granicus (not YouTube).
-- `event_media` field on events holds the Granicus clip ID (e.g. `"2171"`)
-- Player page: `https://corpuschristi.granicus.com/player/clip/{clipId}?view_id=2&redirect=true`
-- M3U8 URL extracted via regex: `video_url="(https://archive-stream\.granicus\.com/[^"]+\.m3u8)"`
-
-**ElevenLabs Scribe v2:**
+**ElevenLabs Scribe v2 parameters (verified):**
 - Auth: `xi-api-key` header
-- Submit endpoint: `POST https://api.elevenlabs.io/v1/speech-to-text` (with `webhook=true`)
-- Poll endpoint: `GET https://api.elevenlabs.io/v1/speech-to-text/transcripts/{transcription_id}`
-- Returns word-level data — post-processed into speaker-turn segments
+- Submit: `POST https://api.elevenlabs.io/v1/speech-to-text` — form data (not JSON)
+- `cloud_storage_url` — R2 public URL (not `url` or `audio_url`)
+- `model_id=scribe_v2`, `diarize=true`, `webhook=true`, `webhook_id=<id>`, `entity_detection=pii`
+- `keyterms` — repeated form field, up to 1000 terms × 50 chars, scribe_v2 only
+- Poll: `GET https://api.elevenlabs.io/v1/speech-to-text/transcripts/{id}`
 - Speaker labels: `"speaker_0"`, `"speaker_1"` etc. (arbitrary per recording, no cross-recording identity)
-- Timestamps in decimal seconds
-- Cost: ~$0.40/hr → ~$760 for full 637-meeting backfill
-- Results stored for 2 years on ElevenLabs servers
+- Cost: ~$0.40/hr. Results stored for 2 years on ElevenLabs servers.
+- Full reference: `docs/elevenlabs-api.md`
+
+**Keyterm prompting:**
+- `load_keyterms(supabase, event_date)` — queries active council members from `office_records + persons`, returns first/last/full names
+- Appends `SUPPLEMENTAL_KEYTERMS` (hardcoded in `transcribe.py`): CC water infrastructure, organizations, water policy terms, acronyms
+- Dynamic roster ensures newly seated members are included automatically
+
+**Audio storage — Cloudflare R2:**
+- Bucket: `cc-civic-data` (public read enabled)
+- Public URL base: `https://pub-b1d9e555223a4dd3ae4aeea0d7570cc1.r2.dev`
+- Object key: `audio/event_{event_id}.mp3`
+- Access via boto3 S3-compatible client using `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`
+- 10GB free tier; files are ~380–476MB each
+
+**Supabase Edge Function:**
+- `supabase/functions/elevenlabs-webhook/index.ts` — Deno/TypeScript
+- Verifies HMAC-SHA256 signature (`ELEVENLABS_WEBHOOK_SECRET`)
+- Returns 200 immediately; processes async via `EdgeRuntime.waitUntil()`
+- Never returns 5xx (would trigger ElevenLabs retry → double-insert)
+- Secrets needed: `ELEVENLABS_WEBHOOK_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_URL`, `GITHUB_PAT`
+- Deploy: `supabase functions deploy elevenlabs-webhook`
 
 **Speaker mapping:** Two-stage process:
-1. `auto_map_speakers.py` — Claude analyzes transcript text for name mentions (self-introductions, direct address, roll call), applies high-confidence mappings to `speaker_mappings` directly, stores medium/low suggestions in `speaker_mapping_suggestions`
+1. `auto_map_speakers.py` — Claude analyzes transcript text for name mentions (self-introductions, direct address, roll call). Uses forced tool use (`tool_choice`) to guarantee JSON output. Pre-filters public commenters (short + early speakers) without calling Claude. Batches 30 labels per Claude call, `max_tokens=16000`.
 2. Streamlit Map Speakers admin page — review pending suggestions (approve/reject with Claude's reasoning shown), manually map any remaining unlabeled speakers with enhanced profiles (8 longest utterances, speaking time stats)
 
-**Credentials:** `.env` file — `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`
+**Known issues:**
+- event_id 4086: repeated ElevenLabs failures and duplicate charges. Support ticket submitted 2026-04-08. Use `--elevenlabs-id` when support provides the transcription ID.
+- Some recordings are 7–9 hours long → ~380–476MB MP3 files
+
+**Credentials:**
+- `.env` file: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `ELEVENLABS_WEBHOOK_ID`
+- GitHub Actions secrets: same as above + `ELEVENLABS_WEBHOOK_ID`
+- Supabase Edge Function secrets: `ELEVENLABS_WEBHOOK_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_URL`, `GITHUB_PAT`
 
 **Scope:** City Council meetings only, manually triggered per event. ~637 events have a Granicus clip ID.
+
+## Next Session Priorities
+
+1. **Legistar sync workflow** — No GitHub Actions workflow exists to pull new events from Legistar. Need on-demand script + workflow to sync events, event_items, and votes for new meetings (city council meeting 2026-04-10).
+2. **Transcription notifications** — Push notifications (ntfy.sh or similar) after: (a) ElevenLabs webhook fires and segments are inserted, (b) auto_map_speakers completes. Add to Edge Function and map_speakers workflow.
 
 ## Full API References
 
 - `docs/legistar-api.md` — all Legistar endpoints with live-verified field schemas and known quirks
+- `docs/elevenlabs-api.md` — complete ElevenLabs Scribe v2 reference: correct param names, webhook setup, entity detection, keyterms, realtime streaming
 - `docs/airtable-scripting-api.md` — kept for reference; Airtable no longer primary data store
