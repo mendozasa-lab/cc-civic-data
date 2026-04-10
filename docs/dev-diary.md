@@ -230,9 +230,74 @@ All 9 tables fully synced. Final record counts:
 
 ---
 
-## 2026-04-05 — Next session priorities
+## 2026-04-09 — ElevenLabs async pipeline, webhook, entity detection, keyterms, R2 storage
 
-1. **Verify Supabase migration and delete Airtable** — spot-check record counts and a sample of FK-linked records across all 8 tables. Once confident, delete the Airtable base to free up the plan.
-2. **Transcription pipeline** — add `transcript_segments` table to Supabase schema, write Python script to fetch Granicus M3U8 → submit to ElevenLabs Scribe v2 → store segments, write speaker mapping script.
-3. **Deploy Streamlit app publicly** — push to GitHub, connect to Streamlit Community Cloud.
-4. **Extend historical depth to 2015** — current sync covers 2020-present. Re-run Matters, Events, Event Items, and Votes syncs from 2015-01-01. Expect significant record count growth; verify Supabase free tier (500MB) still has headroom afterward.
+**Context:** Multiple transcription attempts failed due to: synchronous ElevenLabs submission timing out on long recordings, wrong API parameter names, Supabase Storage 50MB file size limit, and Claude returning prose instead of JSON for auto-map speakers.
+
+**Decisions and fixes:**
+
+1. **Cloudflare R2 for audio storage** — replaced Supabase Storage (50MB limit) with R2 (10GB free tier). Audio files are uploaded as `event_{eid}.mp3` and the public URL is saved to `transcripts.audio_url`. If audio is already in R2 on retry, upload is skipped.
+
+2. **ElevenLabs async + webhook flow** — replaced synchronous polling (which times out on 4–9 hour recordings) with async submission (`webhook=true`). ElevenLabs returns `transcription_id` immediately and POSTs the full result to our Supabase Edge Function when done. `transcription_id` is saved to DB immediately so crash recovery is possible.
+
+3. **ElevenLabs correct parameters** — correct param for R2 URL is `cloud_storage_url` (not `url`, `audio_url`, or `file_url`). `webhook=true` requires a webhook configured in the ElevenLabs workspace dashboard with an HTTPS callback URL.
+
+4. **Supabase Edge Function** — `supabase/functions/elevenlabs-webhook/index.ts` (Deno/TypeScript): verifies HMAC signature, converts words→segments, maps entity char offsets→segment_id, inserts `transcript_segments` and `transcript_entities`, marks transcript complete, dispatches `map_speakers` GitHub Actions workflow via GitHub API.
+
+5. **Entity detection** — added `entity_detection=pii` to ElevenLabs submission. New `transcript_entities` table stores detected entities (person names, organizations, etc.) with char offsets and segment references. Enables cross-meeting queries like "find all meetings where X was mentioned."
+
+6. **Keyterm prompting** — added dynamic keyterms (active council member names from Supabase) + hardcoded `SUPPLEMENTAL_KEYTERMS` (water crisis proper nouns: Choke Canyon, Acciona Agua, TCEQ, curtailment, brine discharge, etc.). 63 terms total on first test.
+
+7. **Auto-map speakers JSON fix** — claude-opus-4-6 doesn't support assistant prefill. Switched to forced tool use (`tool_choice={"type":"tool","name":"submit_speaker_mappings"}`) to guarantee JSON output. Also added pre-filtering of labels with both `short_time` + `early_only` flags (likely public commenters) and batching (30 labels per Claude call) to avoid hitting token limits.
+
+8. **Full ElevenLabs API docs** — `docs/elevenlabs-api.md` rewritten with correct parameters, all endpoints, webhook setup, keyterm/entity guidance, and realtime streaming reference.
+
+**Infrastructure added:**
+- Cloudflare R2 bucket `cc-civic-audio` (public URL: `https://pub-b1d9e555223a4dd3ae4aeea0d7570cc1.r2.dev`)
+- Supabase Edge Function `elevenlabs-webhook` deployed
+- `transcript_entities` table in Supabase
+- New GitHub secrets: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `ELEVENLABS_WEBHOOK_ID`
+- New Supabase secrets: `ELEVENLABS_WEBHOOK_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`, `GITHUB_PAT`
+
+**First successful async submission:** event_id=4111, transcript_id=3, ElevenLabs transcription_id=`mK9OUZsMvaU7IdlOZ6G5`
+
+**Known open issue — event 4086:** Has had repeated ElevenLabs failures. History API is TTS-only and can't help. Need `transcription_id` from ElevenLabs support → recover via `python transcribe.py --event-id 4086 --elevenlabs-id <id>`.
+
+**Open questions / follow-up:**
+1. **Legistar sync workflow** — no GitHub Actions workflow exists to pull new events. City council meeting tomorrow (2026-04-10). Need on-demand Legistar sync script urgently.
+2. **Transcription notifications** — want push notifications after ElevenLabs webhook fires and after auto-map speakers completes. Plan: ntfy.sh or similar, added to Edge Function and map_speakers workflow.
+3. Verify webhook actually fires and segments are inserted for event 4111 (check Edge Function logs).
+
+---
+
+## 2026-04-10 — Event 4111 recovery, entity import, staff speaker mapping
+
+**Context:** Event 4111 (9-hour meeting) was submitted to ElevenLabs async but the webhook never fired — Supabase Edge Function logs showed zero invocations. ElevenLabs had completed transcription (180,060 words). Recovered via crash recovery path. Also discovered speaker mapping was missing key staff.
+
+**What happened with the webhook:** The transcription completed on ElevenLabs' side but the webhook did not fire — likely a misconfiguration of the `webhook_id` or the webhook URL in the ElevenLabs workspace dashboard. Need to verify the webhook URL matches the deployed Edge Function URL and test with a new submission.
+
+**Decisions and fixes:**
+
+1. **Crash recovery for event 4111** — ran `python transcribe.py --event-id 4111 --elevenlabs-id mK9OUZsMvaU7IdlOZ6G5`. Inserted 3,175 segments. Duration was 32,406s (~9 hrs), cost $3.60.
+
+2. **Entity import script** — `_poll_and_insert` in `transcribe.py` was silently dropping entities on the crash recovery path. Fixed in two ways:
+   - `_poll_and_insert` now also fetches `entities` from the ElevenLabs response and inserts them, rebuilding char offsets from the already-inserted segments to map to `segment_id`s
+   - New `scripts/transcription/import_entities.py` — one-shot script for backfilling entities on transcripts that went through crash recovery before the fix. Used it to insert 2,039 entities for event 4111.
+
+3. **Named staff in speaker mapping** — `load_roster()` only queried city council members, so Claude had no `person_id` for key staff like City Manager. Fixed:
+   - `load_roster()` now returns `(council, staff)` tuple — staff comes from office_records with titles City Manager/City Secretary/City Attorney, plus a hardcoded `NAMED_STAFF` supplement
+   - Peter Zanoni (person_id=820, City Manager) has **no office_records in Legistar at all** — added to `NAMED_STAFF` hardcoded list
+   - Rebecca Huerta (person_id=179, City Secretary) is in Legistar with an open-ended record — picked up automatically
+   - Claude prompt updated to show staff with person_ids and treat them same as council for auto-apply
+
+4. **manage_named_staff workflow** — new GitHub Actions workflow (`manage_named_staff.yml`) + script (`manage_named_staff.py`) for adding people to `NAMED_STAFF` without editing code manually:
+   - Run with name only → logs matching persons + person_ids
+   - Run with name + person_id + title → edits `auto_map_speakers.py` and commits to main
+
+5. **Entity detection not integrated into speaker mapping** — discussed and decided against it. Current regex-based name detection in `detect_name_evidence()` provides equivalent signal. Real gap was missing person_ids for staff, not missing name detection. Entities are better used in Streamlit search/analytics.
+
+**Open questions / follow-up:**
+1. **Legistar sync workflow** — still needed urgently (city council meeting today 2026-04-10). No GitHub Actions workflow exists to pull new events/items/votes.
+2. **Transcription notifications** — ntfy.sh or similar, after webhook fires and after map_speakers completes.
+3. **Verify webhook** — submit a new transcription and confirm the Edge Function actually receives the callback. Check webhook URL and `webhook_id` in ElevenLabs dashboard.
+4. **Re-run map_speakers for event 4111** — needs another run now that Zanoni is in the staff roster.

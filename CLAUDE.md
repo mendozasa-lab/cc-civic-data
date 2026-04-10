@@ -93,6 +93,8 @@ All scripts complete. The JS scripts in `scripts/` were the original Airtable im
 | `fetch_m3u8.py` | Scrapes Granicus player pages, extracts M3U8 URLs, creates `transcripts` records (status=pending) |
 | `transcribe.py` | Downloads audio via ffmpeg, uploads to R2, submits to ElevenLabs async with webhook; exits after submission. Segment insertion handled by Edge Function. |
 | `auto_map_speakers.py` | Uses Claude to identify speaker labels from transcript text; applies high-confidence mappings, stores medium/low in `speaker_mapping_suggestions` |
+| `import_entities.py` | Backfills `transcript_entities` for transcripts processed via crash-recovery path (which previously skipped entities). Usage: `python import_entities.py --event-id N` |
+| `manage_named_staff.py` | Search persons by name and add to `NAMED_STAFF` in auto_map_speakers.py. Used by the `manage_named_staff.yml` workflow. |
 | `summarize.py` | Generates meeting summaries + rolling member summaries via Claude (claude-opus-4-6) |
 | `supabase_client.py` | Shared Supabase client (service key), `fetch_all()`, `upsert_batch()` helpers |
 
@@ -161,12 +163,15 @@ All scripts complete. The JS scripts in `scripts/` were the original Airtable im
 - Deploy: `supabase functions deploy elevenlabs-webhook`
 
 **Speaker mapping:** Two-stage process:
-1. `auto_map_speakers.py` — Claude analyzes transcript text for name mentions (self-introductions, direct address, roll call). Uses forced tool use (`tool_choice`) to guarantee JSON output. Pre-filters public commenters (short + early speakers) without calling Claude. Batches 30 labels per Claude call, `max_tokens=16000`.
+1. `auto_map_speakers.py` — Claude analyzes transcript text for name mentions (self-introductions, direct address, roll call). Uses forced tool use (`tool_choice`) to guarantee JSON output. Pre-filters public commenters (short + early speakers) without calling Claude. Batches 30 labels per Claude call, `max_tokens=16000`. `load_roster()` returns `(council, staff)` — council from office_records (city council body), staff from office_records (City Manager/Secretary/Attorney titles) + `NAMED_STAFF` hardcoded supplement. High-confidence staff mappings auto-apply same as council.
 2. Streamlit Map Speakers admin page — review pending suggestions (approve/reject with Claude's reasoning shown), manually map any remaining unlabeled speakers with enhanced profiles (8 longest utterances, speaking time stats)
+
+**NAMED_STAFF** — hardcoded at top of `auto_map_speakers.py`. Add key recurring staff who have a `person_id` in Supabase but no office_records in Legistar. Peter Zanoni (City Manager, person_id=820) is there — Legistar has no record for him. Rebecca Huerta (City Secretary, person_id=179) is picked up from office_records automatically. To add someone: use the `manage_named_staff.yml` GitHub Actions workflow (search by name, then add with person_id + title).
 
 **Known issues:**
 - event_id 4086: repeated ElevenLabs failures and duplicate charges. Support ticket submitted 2026-04-08. Use `--elevenlabs-id` when support provides the transcription ID.
-- Some recordings are 7–9 hours long → ~380–476MB MP3 files
+- event_id 4111: webhook did not fire (zero Edge Function invocations). Recovered via crash recovery path. Likely cause: webhook_id or URL misconfiguration in ElevenLabs dashboard. Verify before next submission.
+- Some recordings are 7–9 hours long → ~380–476MB MP3 files, ~$3.60/recording at $0.40/hr
 
 **Credentials:**
 - `.env` file: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `ELEVENLABS_WEBHOOK_ID`
@@ -177,8 +182,9 @@ All scripts complete. The JS scripts in `scripts/` were the original Airtable im
 
 ## Next Session Priorities
 
-1. **Legistar sync workflow** — No GitHub Actions workflow exists to pull new events from Legistar. Need on-demand script + workflow to sync events, event_items, and votes for new meetings (city council meeting 2026-04-10).
+1. **Legistar sync workflow** — No GitHub Actions workflow exists to pull new events from Legistar. Need on-demand script + workflow to sync events, event_items, and votes for new meetings. City council met 2026-04-10 — that data needs to be pulled.
 2. **Transcription notifications** — Push notifications (ntfy.sh or similar) after: (a) ElevenLabs webhook fires and segments are inserted, (b) auto_map_speakers completes. Add to Edge Function and map_speakers workflow.
+3. **Verify ElevenLabs webhook** — check that webhook_id and URL in ElevenLabs dashboard match deployed Edge Function. Submit a test transcription to confirm the callback fires before queueing more meetings.
 
 ## Full API References
 
