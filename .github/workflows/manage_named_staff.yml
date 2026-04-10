@@ -1,0 +1,63 @@
+name: Manage named staff
+
+on:
+  workflow_dispatch:
+    inputs:
+      name_query:
+        description: 'Name to search for (always runs — check logs for matches)'
+        required: true
+      person_id:
+        description: 'Person ID to add (leave blank to search only)'
+        required: false
+        default: ''
+      title:
+        description: 'Title/role (required when adding, e.g. "City Manager")'
+        required: false
+        default: ''
+
+jobs:
+  manage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: scripts/transcription
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Search persons
+        if: ${{ github.event.inputs.person_id == '' }}
+        run: python manage_named_staff.py --search "${{ github.event.inputs.name_query }}"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+
+      - name: Add to NAMED_STAFF
+        if: ${{ github.event.inputs.person_id != '' }}
+        run: |
+          python manage_named_staff.py \
+            --search "${{ github.event.inputs.name_query }}" \
+            --person-id ${{ github.event.inputs.person_id }} \
+            --title "${{ github.event.inputs.title }}"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+
+      - name: Commit and push
+        if: ${{ github.event.inputs.person_id != '' }}
+        run: |
+          cd ../..
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add scripts/transcription/auto_map_speakers.py
+          git diff --staged --quiet || git commit -m "Add ${{ github.event.inputs.name_query }} (person_id=${{ github.event.inputs.person_id }}) to NAMED_STAFF"
+          git push
