@@ -1,0 +1,46 @@
+name: Summarize meeting
+
+on:
+  workflow_dispatch:
+    inputs:
+      event_id:
+        description: 'Event ID (leave blank for all meetings missing a summary)'
+        required: false
+        default: ''
+      person_id:
+        description: 'Person ID — regenerate rolling summary for one council member'
+        required: false
+        default: ''
+
+jobs:
+  summarize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: scripts/transcription
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run summarize
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.event_id }}" ]; then
+            ARGS="--event-id ${{ github.event.inputs.event_id }}"
+          fi
+          if [ -n "${{ github.event.inputs.person_id }}" ]; then
+            ARGS="$ARGS --person-id ${{ github.event.inputs.person_id }}"
+          fi
+          python summarize.py $ARGS
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
