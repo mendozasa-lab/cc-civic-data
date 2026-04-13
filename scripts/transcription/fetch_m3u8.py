@@ -2,14 +2,15 @@
 fetch_m3u8.py — Scrape Granicus player pages and create transcript records.
 
 Usage:
-    python fetch_m3u8.py                  # all events with event_media, skips existing
-    python fetch_m3u8.py --event-id 1234  # single event
+    python fetch_m3u8.py                        # events with media in past 14 days, skips existing
+    python fetch_m3u8.py --since 2026-04-01     # events with media on or after this date
+    python fetch_m3u8.py --event-id 1234        # single event
 """
 
 import argparse
 import re
-import sys
 import time
+from datetime import datetime, timezone, timedelta
 
 import requests
 
@@ -35,14 +36,19 @@ def fetch_m3u8_url(clip_id: str) -> str | None:
     return match.group(1)
 
 
-def run(event_id: int | None = None) -> None:
+def run(event_id: int | None = None, since: str | None = None) -> None:
     client = get_client()
 
     # Load events with event_media set
     if event_id:
-        result = client.table("events").select("event_id, event_media").eq("event_id", event_id).execute()
+        result = client.table("events").select("event_id, event_media, event_date") \
+            .eq("event_id", event_id).execute()
     else:
-        result = client.table("events").select("event_id, event_media").not_.is_("event_media", "null").execute()
+        q = client.table("events").select("event_id, event_media, event_date") \
+            .not_.is_("event_media", "null")
+        if since:
+            q = q.gte("event_date", since)
+        result = q.execute()
 
     events = result.data
     if not events:
@@ -63,10 +69,10 @@ def run(event_id: int | None = None) -> None:
         print(f"[{i}/{len(to_process)}] event_id={eid} clip_id={clip_id} ... ", end="", flush=True)
         m3u8 = fetch_m3u8_url(clip_id)
         if m3u8:
-            print(f"OK")
+            print("OK")
             records.append({"event_id": eid, "m3u8_url": m3u8, "status": "pending"})
         else:
-            print(f"SKIP")
+            print("SKIP")
         time.sleep(0.5)  # be polite to Granicus
 
     if records:
@@ -78,6 +84,13 @@ def run(event_id: int | None = None) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fetch Granicus M3U8 URLs and create transcript records.")
-    parser.add_argument("--event-id", type=int, help="Process a single event by ID")
+    parser.add_argument("--event-id", type=int, help="Process a single event by ID.")
+    parser.add_argument(
+        "--since",
+        default=None,
+        help="Queue events with event_date >= this date (YYYY-MM-DD). Default: 14 days ago.",
+    )
     args = parser.parse_args()
-    run(event_id=args.event_id)
+
+    since = args.since or (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
+    run(event_id=args.event_id, since=since if not args.event_id else None)

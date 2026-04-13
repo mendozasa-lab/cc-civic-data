@@ -1,0 +1,47 @@
+name: Fetch M3U8 URLs
+
+on:
+  schedule:
+    - cron: '30 8 * * 3'  # Wednesday 08:30 UTC — 30 min after Legistar sync
+    - cron: '30 8 * * 6'  # Saturday  08:30 UTC — 30 min after Legistar sync
+  workflow_dispatch:
+    inputs:
+      since:
+        description: 'Queue events with media on or after this date (YYYY-MM-DD). Default: 14 days ago.'
+        required: false
+        default: ''
+      event_id:
+        description: 'Queue a single event by ID (overrides since).'
+        required: false
+        default: ''
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: scripts/transcription
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch M3U8 URLs
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.event_id }}" ]; then
+            ARGS="--event-id ${{ github.event.inputs.event_id }}"
+          elif [ -n "${{ github.event.inputs.since }}" ]; then
+            ARGS="--since ${{ github.event.inputs.since }}"
+          fi
+          python fetch_m3u8.py $ARGS
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
