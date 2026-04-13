@@ -34,6 +34,7 @@ NAMED_STAFF = [
     {"person_id": 820, "person_full_name": "Peter Zanoni", "title": "City Manager"},
     {"person_id": 628, "person_full_name": "Esteban Ramos", "title": "Assistant Director of Water Supply Management"},
     {"person_id": 517, "person_full_name": "Miles Risley", "title": "City Attorney"},
+    {"person_id": 1332, "person_full_name": "Nicholas Winkelmann", "title": "Chief Operating Officer of CCW"},
 ]
 
 
