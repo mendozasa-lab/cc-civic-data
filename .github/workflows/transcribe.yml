@@ -7,6 +7,10 @@ on:
         description: 'Event ID (leave blank for all pending)'
         required: false
         default: ''
+      elevenlabs_id:
+        description: 'ElevenLabs transcription ID (crash recovery only — requires event_id)'
+        required: false
+        default: ''
 
 jobs:
   transcribe:
@@ -31,7 +35,9 @@ jobs:
 
       - name: Run transcription
         run: |
-          if [ -n "${{ github.event.inputs.event_id }}" ]; then
+          if [ -n "${{ github.event.inputs.elevenlabs_id }}" ]; then
+            python transcribe.py --event-id ${{ github.event.inputs.event_id }} --elevenlabs-id ${{ github.event.inputs.elevenlabs_id }}
+          elif [ -n "${{ github.event.inputs.event_id }}" ]; then
             python transcribe.py --event-id ${{ github.event.inputs.event_id }}
           else
             python transcribe.py
