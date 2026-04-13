@@ -2,8 +2,8 @@ name: Sync Legistar data
 
 on:
   schedule:
-    - cron: '0 2 * * 3'  # Wednesday 02:00 UTC — catches Tuesday council meetings
-    - cron: '0 2 * * 6'  # Saturday  02:00 UTC — catches any midweek amendments/specials
+    - cron: '0 8 * * 3'  # Wednesday 08:00 UTC (02:00 CST) — catches Tuesday council meetings
+    - cron: '0 8 * * 6'  # Saturday  08:00 UTC (02:00 CST) — catches any midweek amendments/specials
   workflow_dispatch:
     inputs:
       since:
