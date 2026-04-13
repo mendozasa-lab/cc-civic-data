@@ -10,7 +10,7 @@ import streamlit as st
 
 GRANICUS_PLAYER = (
     "https://corpuschristi.granicus.com/player/clip/{clip_id}"
-    "?view_id=2&redirect=true&entrytime={ts}"
+    "?view_id=2&redirect=true&entrytime={ts}&muted=0"
 )
 
 TOOLTIP_CSS = """
