@@ -176,6 +176,20 @@ def sync_event_items(client, event_ids: list[int], dry_run: bool) -> list[int]:
     if not all_rows:
         return []
 
+    # Null out matter_ids not present in Supabase to avoid FK violations.
+    # Legistar may reference matters outside our synced date range.
+    known_matters = {
+        r["matter_id"]
+        for r in client.table("matters").select("matter_id").execute().data
+    }
+    missing = 0
+    for row in all_rows:
+        if row["matter_id"] is not None and row["matter_id"] not in known_matters:
+            row["matter_id"] = None
+            missing += 1
+    if missing:
+        print(f"[event_items]   {missing} item(s) reference unknown matters — matter_id set to null.")
+
     if dry_run:
         print(f"[event_items] DRY RUN — would upsert {len(all_rows)} rows.")
     else:
