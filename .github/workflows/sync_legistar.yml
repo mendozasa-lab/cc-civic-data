@@ -1,0 +1,52 @@
+name: Sync Legistar data
+
+on:
+  schedule:
+    - cron: '0 8 * * 3'  # Wednesday 08:00 UTC — catches Tuesday council meetings
+    - cron: '0 8 * * 6'  # Saturday  08:00 UTC — catches midweek amendments/specials
+  workflow_dispatch:
+    inputs:
+      since:
+        description: 'Start date YYYY-MM-DD (default: 14 days ago). Pulls events from this date forward, including future scheduled meetings.'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Dry run — print counts without writing to Supabase'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: scripts/transcription
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Legistar sync
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.since }}" ]; then
+            ARGS="--since ${{ github.event.inputs.since }}"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python sync_legistar.py $ARGS
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
