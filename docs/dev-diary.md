@@ -270,6 +270,43 @@ All 9 tables fully synced. Final record counts:
 
 ---
 
+## 2026-04-13 — Legistar sync automation, webhook fixes, pipeline improvements
+
+**Context:** Three priorities from last session: (1) Legistar sync workflow for new meetings, (2) verify/fix ElevenLabs webhook, (3) transcription notifications.
+
+**Completed:**
+
+1. **ElevenLabs webhook — JWT bypass fix** — Edge Function was returning 401 before even running because Supabase requires a JWT `Authorization` header by default. ElevenLabs doesn't send one. Fixed by deploying with `--no-verify-jwt`: `npx supabase functions deploy elevenlabs-webhook --no-verify-jwt`. Function now receives requests and runs HMAC verification itself.
+
+2. **ElevenLabs webhook — HMAC secret mismatch** — After JWT fix, HMAC verification was still failing (401 from inside the function, visible in Edge Function logs). Root cause: `ELEVENLABS_WEBHOOK_SECRET` in Supabase was wrong. User recreated the webhook in ElevenLabs dashboard to get a fresh known secret, updated Supabase secrets and local `.env`. Also enabled retry in ElevenLabs dashboard (`retry_enabled: true`).
+
+3. **Legistar sync workflow** — New `scripts/transcription/sync_legistar.py` syncs all 8 Legistar tables to Supabase. Runs Wed/Sat at 02:00 CST (08:00 UTC) via `.github/workflows/sync_legistar.yml`. Supports `--since` (default 14 days ago, pulls forward including future scheduled meetings) and `--dry-run`. FK violations handled by: nulling stale body_id/person_id refs in office_records; fetching missing matters on-demand when event_items reference unknown matter_ids.
+
+4. **fetch_m3u8 workflow** — Added `--since` date filter to `fetch_m3u8.py` (default 14 days ago). New `.github/workflows/fetch_m3u8.yml` runs Wed/Sat at 02:30 CST (08:30 UTC), 30 min after Legistar sync. Supports `--since` and `--event-id` manual inputs.
+
+5. **Crash recovery bug fix** — `transcribe.py` had a logic error where `elevenlabs_transcription_id` stored in the `transcripts` record was never read during crash recovery. Running `--event-id N` without `--elevenlabs-id` would re-submit to ElevenLabs and charge again. Fixed: now auto-detects stored ID, uses polling path automatically. `--elevenlabs-id` flag kept as explicit override.
+
+6. **Event 4235 recovery** — April 10th council meeting. Transcript submitted successfully but webhook still failed (secret mismatch not yet fixed at time of submission). Recovered via crash recovery path in `transcribe.yml` (just `event_id=4235`, no elevenlabs_id needed after bug fix). Result: 557 segments, 367 entities, 6456s duration, $0.72.
+
+7. **NAMED_STAFF additions** — Added to `auto_map_speakers.py`:
+   - Esteban Ramos (person_id=628) — Assistant Director of Water Supply Management
+   - Miles Risley (person_id=517) — City Attorney
+   - Nicholas Winkelmann (person_id=1332) — Chief Operating Officer of CCW
+   - Buck Bryce (Deputy City Attorney) — not in persons table, skipped
+
+8. **Map Speakers UI** — Added inline override mapping to the Pending Review section. Each suggestion card now has Approve / Reject / "Map to different person" selectbox + Save override, so you can correct Claude's suggestion without rejecting and re-finding in manual mapping.
+
+9. **Summarize workflow** — Discussed but deferred. `summarize.py` has no GitHub Actions workflow yet.
+
+**Open questions / follow-up:**
+1. **Transcription notifications** — still not done. ntfy.sh (or similar) after webhook fires and after map_speakers completes.
+2. **Summarize workflow** — add `summarize.yml` so summaries can be triggered from GitHub Actions.
+3. **Buck Bryce** — not in persons table. Would need a manual insert to add him to NAMED_STAFF.
+4. **Re-run map_speakers for event 4235** — mappings were cleared at end of session for a fresh run with updated NAMED_STAFF.
+5. **Verify webhook end-to-end** — next transcription submission will be the real test after secret fix.
+
+---
+
 ## 2026-04-10 — Event 4111 recovery, entity import, staff speaker mapping
 
 **Context:** Event 4111 (9-hour meeting) was submitted to ElevenLabs async but the webhook never fired — Supabase Edge Function logs showed zero invocations. ElevenLabs had completed transcription (180,060 words). Recovered via crash recovery path. Also discovered speaker mapping was missing key staff.
