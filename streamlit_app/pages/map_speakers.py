@@ -286,6 +286,18 @@ if pending_suggestions:
                     st.warning(f"Rejected: {label}")
                     st.rerun()
 
+            st.markdown("**Or map to a different person:**")
+            none_opt = "— Not a council member / Skip —"
+            override_options = [none_opt] + list(member_options.keys())
+            override_default = override_options.index(person_name) if person_name in override_options else 0
+            chosen = st.selectbox("Assign to", override_options, index=override_default, key=f"override_{label}")
+            if st.button("Save override", key=f"override_btn_{label}"):
+                pid_override = member_options.get(chosen) if chosen != none_opt else None
+                save_mapping(transcript_id, label, pid_override)
+                update_suggestion_status(transcript_id, label, "approved")
+                st.success(f"Saved: **{label}** → {chosen if chosen != none_opt else 'unmapped'}")
+                st.rerun()
+
     st.divider()
 
 # ---------------------------------------------------------------------------
