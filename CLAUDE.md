@@ -173,13 +173,15 @@ All scripts complete. The JS scripts in `scripts/` were the original Airtable im
 - Esteban Ramos (628) — Assistant Director of Water Supply Management
 - Miles Risley (517) — City Attorney
 - Nicholas Winkelmann (1332) — Chief Operating Officer of CCW
+- Kaylynn Paxson (1449) — Council Member (no Legistar office_records as of 2026-04-13)
+- Eric Cantu (1448) — Council Member (no Legistar office_records as of 2026-04-13)
 
 Rebecca Huerta (City Secretary, person_id=179) is picked up from office_records automatically. To add someone: use the `manage_named_staff.yml` GitHub Actions workflow (search by name, then add with person_id + title). Buck Bryce (Deputy City Attorney) is not in the persons table — would need a manual insert first.
 
 **Known issues:**
 - event_id 4086: repeated ElevenLabs failures and duplicate charges. Support ticket submitted 2026-04-08. Use `--elevenlabs-id` when support provides the transcription ID.
 - event_id 4111: webhook did not fire. Recovered via crash recovery path. Root cause: (1) Edge Function was rejecting with 401 due to missing JWT — fixed by deploying with `--no-verify-jwt`. (2) HMAC secret mismatch — fixed by recreating webhook and updating Supabase secret.
-- event_id 4235: webhook failed (same root cause as 4111, not yet fixed at submission time). Recovered via polling path. Segments and entities inserted. Speaker mappings cleared 2026-04-13 for fresh auto-mapping run.
+- event_id 4235: webhook failed (same root cause as 4111, not yet fixed at submission time). Recovered via polling path. Segments and entities inserted. Speaker mappings re-run and summarized 2026-04-13.
 - Some recordings are 7–9 hours long → ~380–476MB MP3 files, ~$3.60/recording at $0.40/hr
 
 **Credentials:**
@@ -192,9 +194,8 @@ Rebecca Huerta (City Secretary, person_id=179) is picked up from office_records 
 ## Next Session Priorities
 
 1. **Transcription notifications** — Push notifications (ntfy.sh or similar) after: (a) ElevenLabs webhook fires and segments are inserted, (b) auto_map_speakers completes. Add to Edge Function and map_speakers workflow.
-2. **Summarize workflow** — `summarize.py` has no GitHub Actions workflow. Add `summarize.yml` for on-demand triggering after speaker mapping is done.
-3. **Verify ElevenLabs webhook end-to-end** — webhook secret was reset (user recreated webhook 2026-04-13). Next transcription submission will be the real test. If it fails, check Edge Function logs for HMAC errors.
-4. **Re-run map_speakers for event 4235** — mappings cleared at end of 2026-04-13 session. Run `map_speakers.yml` with `event_id=4235`, then run summarize for that event.
+2. **Verify ElevenLabs webhook end-to-end** — webhook secret was reset (user recreated webhook 2026-04-13). Next transcription submission will be the real test. If it fails, check Edge Function logs for HMAC errors.
+3. **NotebookLM export** — Design a pipeline to produce NotebookLM source documents from civic data so the public can query it. Open questions: what goes in — transcripts only, or also votes and matter attachments? One notebook per meeting, one per council member, or one big corpus? What format (PDF, Markdown, Google Doc)? How often refreshed?
 
 ## Full API References
 
