@@ -2,8 +2,8 @@ name: Fetch M3U8 URLs
 
 on:
   schedule:
-    - cron: '30 8 * * 3'  # Wednesday 08:30 UTC — 30 min after Legistar sync
-    - cron: '30 8 * * 6'  # Saturday  08:30 UTC — 30 min after Legistar sync
+    - cron: '30 2 * * 3'  # Wednesday 02:30 UTC — 30 min after Legistar sync
+    - cron: '30 2 * * 6'  # Saturday  02:30 UTC — 30 min after Legistar sync
   workflow_dispatch:
     inputs:
       since:
