@@ -32,6 +32,8 @@ TOP_UTTERANCES = 5       # longest segments to send per speaker label
 # Add person_id + title here when they're a consistent presence at council meetings.
 NAMED_STAFF = [
     {"person_id": 820, "person_full_name": "Peter Zanoni", "title": "City Manager"},
+    {"person_id": 628, "person_full_name": "Esteban Ramos", "title": "Assistant Director of Water Supply Management"},
+    {"person_id": 517, "person_full_name": "Miles Risley", "title": "City Attorney"},
 ]
 
 
