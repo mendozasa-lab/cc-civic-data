@@ -249,6 +249,21 @@ def sync_office_records(client, dry_run: bool) -> None:
     records = fetch_legistar_paginated("OfficeRecords")
     print(f"[office_records] Found {len(records)} office records.")
     rows = [transform_office_record(r) for r in records]
+
+    # Null out FK refs to bodies/persons not in Supabase (e.g. deleted bodies).
+    known_bodies = {r["body_id"] for r in client.table("bodies").select("body_id").execute().data}
+    known_persons = {r["person_id"] for r in client.table("persons").select("person_id").execute().data}
+    nulled = 0
+    for row in rows:
+        if row["body_id"] is not None and row["body_id"] not in known_bodies:
+            row["body_id"] = None
+            nulled += 1
+        if row["person_id"] is not None and row["person_id"] not in known_persons:
+            row["person_id"] = None
+            nulled += 1
+    if nulled:
+        print(f"[office_records]   {nulled} FK reference(s) to unknown bodies/persons set to null.")
+
     if dry_run:
         print(f"[office_records] DRY RUN — would upsert {len(rows)} rows.")
     else:
