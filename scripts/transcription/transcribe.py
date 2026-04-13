@@ -311,11 +311,10 @@ def transcribe_one(
     print(f"Transcribing transcript_id={tid} event_id={eid}")
 
     # --- Crash recovery path: poll an existing transcription_id ---
-    el_tid = elevenlabs_id or (
-        transcript.get("elevenlabs_transcription_id") if elevenlabs_id else None
-    )
-    if elevenlabs_id:
-        el_tid = elevenlabs_id
+    # Use --elevenlabs-id if provided, otherwise fall back to what's already in the DB.
+    # This handles the case where the webhook failed but the job was submitted successfully.
+    el_tid = elevenlabs_id or transcript.get("elevenlabs_transcription_id")
+    if el_tid:
         print(f"  Crash recovery: polling ElevenLabs transcription_id={el_tid}")
         client.table("transcripts").update({"status": "processing"}).eq("transcript_id", tid).execute()
         _poll_and_insert(client, tid, eid, el_tid, api_key)
