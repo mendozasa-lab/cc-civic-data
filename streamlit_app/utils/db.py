@@ -8,6 +8,18 @@ only queried once per session, not on every user interaction.
 import streamlit as st
 from supabase import create_client, Client
 import pandas as pd
+from datetime import date
+
+# People who appear at council meetings but lack current office_records in Legistar.
+# Mirror of NAMED_STAFF in scripts/transcription/auto_map_speakers.py — keep in sync.
+NAMED_PERSONS = [
+    {"person_id": 820,  "person_full_name": "Peter Zanoni",        "person_first_name": "Peter",    "person_last_name": "Zanoni",     "person_email": None, "current_title": "City Manager"},
+    {"person_id": 628,  "person_full_name": "Esteban Ramos",       "person_first_name": "Esteban",  "person_last_name": "Ramos",      "person_email": None, "current_title": "Assistant Director of Water Supply Management"},
+    {"person_id": 517,  "person_full_name": "Miles Risley",        "person_first_name": "Miles",    "person_last_name": "Risley",     "person_email": None, "current_title": "City Attorney"},
+    {"person_id": 1332, "person_full_name": "Nicholas Winkelmann", "person_first_name": "Nicholas", "person_last_name": "Winkelmann", "person_email": None, "current_title": "Chief Operating Officer of CCW"},
+    {"person_id": 1449, "person_full_name": "Kaylynn Paxson",      "person_first_name": "Kaylynn",  "person_last_name": "Paxson",     "person_email": None, "current_title": "Council Member"},
+    {"person_id": 1448, "person_full_name": "Eric Cantu",          "person_first_name": "Eric",     "person_last_name": "Cantu",      "person_email": None, "current_title": "Council Member"},
+]
 
 
 @st.cache_resource
@@ -34,11 +46,13 @@ def fetch_all(query_fn, page_size=1000) -> list:
 @st.cache_data(ttl=3600)
 def load_council_members() -> list[dict]:
     """
-    Returns one dict per person who has ever held a council office.
-    Includes all their office record terms and their current/latest title.
+    Returns one dict per active council member or named staff/official.
+    Active = office_record_end_date is null or >= today.
+    Supplements with NAMED_PERSONS for people lacking office_records in Legistar.
     Sorted by last name.
     """
     client = get_client()
+    today = date.today().isoformat()
 
     select_str = (
         "office_record_id, office_record_title, "
@@ -50,10 +64,11 @@ def load_council_members() -> list[dict]:
         lambda lo, hi: client.table("office_records").select(select_str).range(lo, hi)
     )
 
-    # Filter to City Council records only
+    # Filter to active City Council records only
     council_records = [
         r for r in data
         if r.get("bodies") and "city council" in (r["bodies"]["body_name"] or "").lower()
+        and (r.get("office_record_end_date") is None or r["office_record_end_date"] >= today)
     ]
 
     # Group terms by person
@@ -65,7 +80,7 @@ def load_council_members() -> list[dict]:
         pid = p["person_id"]
         if pid not in persons:
             persons[pid] = {
-                "person_id":       pid,
+                "person_id":        pid,
                 "person_full_name": p["person_full_name"],
                 "person_first_name": p["person_first_name"],
                 "person_last_name":  p["person_last_name"],
@@ -80,7 +95,6 @@ def load_council_members() -> list[dict]:
 
     # Determine current/latest title per person
     for p in persons.values():
-        # Sort terms: current (no end date) first, then most recent
         sorted_terms = sorted(
             p["terms"],
             key=lambda t: (t["end_date"] is None, t["start_date"] or ""),
@@ -89,6 +103,11 @@ def load_council_members() -> list[dict]:
         p["current_title"] = sorted_terms[0]["title"] if sorted_terms else None
         p["current_start"]  = sorted_terms[0]["start_date"] if sorted_terms else None
         p["current_end"]    = sorted_terms[0]["end_date"] if sorted_terms else None
+
+    # Append NAMED_PERSONS for people without current office_records
+    for np in NAMED_PERSONS:
+        if np["person_id"] not in persons:
+            persons[np["person_id"]] = {**np, "terms": [], "current_start": None, "current_end": None}
 
     return sorted(persons.values(), key=lambda p: p["person_last_name"] or "")
 
