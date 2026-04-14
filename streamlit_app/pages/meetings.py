@@ -36,14 +36,16 @@ labels = [meeting_label(m) for m in meetings]
 selected_label = st.sidebar.selectbox("Select a meeting", labels)
 selected_meeting = meetings[labels.index(selected_label)]
 
-st.divider()
-
 # ---------------------------------------------------------------------------
 # Meeting summary
 # ---------------------------------------------------------------------------
 
 summary = load_meeting_summary(selected_meeting["event_id"])
 provenance = load_transcript_provenance(selected_meeting["event_id"])
+
+notebooklm_url = (provenance or {}).get("notebooklm_url")
+if notebooklm_url:
+    st.link_button("Click here for the chisme", notebooklm_url)
 clip_id = selected_meeting.get("clip_id") or (provenance or {}).get("clip_id")
 if summary:
     st.subheader("Meeting Summary")
@@ -88,17 +90,6 @@ if summary:
             unsafe_allow_html=True,
         )
 
-    st.divider()
-
-# ---------------------------------------------------------------------------
-# Source document and NotebookLM links
-# ---------------------------------------------------------------------------
-
-source_doc_url = (provenance or {}).get("source_doc_url")
-notebooklm_url = (provenance or {}).get("notebooklm_url")
-
-if notebooklm_url:
-    st.link_button("Click here for the chisme", notebooklm_url)
     st.divider()
 
 # ---------------------------------------------------------------------------
