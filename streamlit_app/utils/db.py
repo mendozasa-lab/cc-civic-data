@@ -290,7 +290,7 @@ def load_transcript_provenance(event_id: int) -> dict | None:
     client = get_client()
     result = (
         client.table("transcripts")
-        .select("m3u8_url, duration_seconds, cost_usd, created_at, completed_at")
+        .select("m3u8_url, duration_seconds, cost_usd, created_at, completed_at, source_doc_url, notebooklm_url")
         .eq("event_id", event_id)
         .execute()
     )

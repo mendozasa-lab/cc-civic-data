@@ -91,6 +91,17 @@ if summary:
     st.divider()
 
 # ---------------------------------------------------------------------------
+# Source document and NotebookLM links
+# ---------------------------------------------------------------------------
+
+source_doc_url = (provenance or {}).get("source_doc_url")
+notebooklm_url = (provenance or {}).get("notebooklm_url")
+
+if notebooklm_url:
+    st.link_button("Click here for the chisme", notebooklm_url)
+    st.divider()
+
+# ---------------------------------------------------------------------------
 # Load segments for selected meeting
 # ---------------------------------------------------------------------------
 

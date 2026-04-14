@@ -158,6 +158,8 @@ CREATE TABLE IF NOT EXISTS transcripts (
   completed_at               TIMESTAMPTZ,
   elevenlabs_transcription_id TEXT,
   audio_url                   TEXT,
+  source_doc_url              TEXT,   -- R2 public URL of per-meeting NotebookLM Markdown source doc
+  notebooklm_url              TEXT,   -- admin-supplied NotebookLM share link
   UNIQUE (event_id)
 );
 
